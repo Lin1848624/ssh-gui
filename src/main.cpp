@@ -980,21 +980,59 @@ static int InitDpi() {
     return dpi;
 }
 
-// ssh 的 askpass 助手模式：把密码写到 stdout
+// ---------------------------------------------------------------------------
+//  askpass 助手模式
+//
+//  ssh 需要读密码或要用户确认时，会把 SSH_ASKPASS 指向的程序拉起来，并把
+//  **提示串作为唯一参数**传过来 —— 它不会传我们的自定义开关，所以命令行里
+//  看不到 --askpass。这里靠环境变量 SSH_GUI_ASKPASS 认出"自己是被当 askpass
+//  调用的"。那个变量由我们启动 ssh 时放进环境块，ssh 会原样传给它的子进程。
+// ---------------------------------------------------------------------------
+static bool ContainsNoCase(const std::wstring& hay, const wchar_t* needle) {
+    size_t n = wcslen(needle);
+    if (n == 0 || hay.size() < n) return false;
+    for (size_t i = 0; i + n <= hay.size(); ++i) {
+        if (_wcsnicmp(hay.c_str() + i, needle, n) == 0) return true;
+    }
+    return false;
+}
+
 static int RunAskPass() {
+    // ssh 把提示串放在第一个参数里，例如 "user@host's password: "
+    std::wstring prompt;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv) {
+        if (argc > 1 && argv[1]) prompt = argv[1];
+        LocalFree(argv);
+    }
+
+    auto emit = [](const std::wstring& s) -> int {
+        std::string u8 = WideToUtf8(s);
+        u8 += "\n";
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (h == INVALID_HANDLE_VALUE || h == nullptr) return 1;
+        DWORD wrote = 0;
+        if (!WriteFile(h, u8.data(), (DWORD)u8.size(), &wrote, nullptr)) return 1;
+        return 0;
+    };
+
+    // 主机密钥确认提示形如 "(yes/no/[fingerprint])? "
+    if (ContainsNoCase(prompt, L"yes/no") || ContainsNoCase(prompt, L"continue connecting")) {
+        wchar_t flag[8] = {};
+        bool autoAccept = GetEnvironmentVariableW(L"SSH_GUI_AUTO_ACCEPT", flag, 8) > 0 &&
+                          flag[0] == L'1';
+        if (!autoAccept) {
+            // 不代答：让 ssh 报失败，用户回终端里自己确认主机指纹
+            return 1;
+        }
+        return emit(L"yes");
+    }
+
     wchar_t buf[1024] = {};
     DWORD n = GetEnvironmentVariableW(L"SSH_GUI_PASSWORD", buf, 1024);
     if (n == 0 || n >= 1024) return 1;
-
-    std::string u8 = WideToUtf8(buf);
-    u8 += "\n";
-
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (h == INVALID_HANDLE_VALUE || h == nullptr) return 1;
-
-    DWORD wrote = 0;
-    if (!WriteFile(h, u8.data(), (DWORD)u8.size(), &wrote, nullptr)) return 1;
-    return 0;
+    return emit(buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1045,9 @@ static int RunAskPass() {
 // ---------------------------------------------------------------------------
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nCmdShow) {
-    if (lpCmdLine && wcsstr(lpCmdLine, L"--askpass")) {
+    // 被 ssh 当作 askpass 拉起来时，命令行里只有提示串，所以看环境变量
+    wchar_t askFlag[8] = {};
+    if (GetEnvironmentVariableW(L"SSH_GUI_ASKPASS", askFlag, 8) > 0) {
         return RunAskPass();
     }
 

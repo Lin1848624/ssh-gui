@@ -162,6 +162,7 @@ static Json SessionToJson(const Session& s) {
     j.Set("compress", s.compress);
     j.Set("verbose", s.verbose);
     j.Set("keepAlive", s.keepAlive);
+    j.Set("autoAcceptHostKey", s.autoAcceptHostKey);
     j.Set("savePassword", s.savePassword);
     if (s.savePassword && !s.password.empty()) {
         std::string enc = ProtectPassword(s.password);
@@ -186,6 +187,7 @@ static Session SessionFromJson(const Json& j) {
     s.compress    = j.GetBool("compress", false);
     s.verbose     = j.GetBool("verbose", false);
     s.keepAlive   = j.GetBool("keepAlive", true);
+    s.autoAcceptHostKey = j.GetBool("autoAcceptHostKey", false);
     s.savePassword = j.GetBool("savePassword", false);
     if (s.savePassword) s.password = UnprotectPassword(j.GetStr("password"));
     if (const std::vector<Json>* fa = j.GetArr("forwards")) {
@@ -263,6 +265,76 @@ static std::wstring FindTool(const wchar_t* exeName) {
 
 std::wstring FindSshExe()  { return FindTool(L"ssh.exe"); }
 std::wstring FindSftpExe() { return FindTool(L"sftp.exe"); }
+
+// ---------------------------------------------------------------------------
+//  askpass 支撑
+// ---------------------------------------------------------------------------
+std::wstring AskPassPath() {
+    std::wstring p = ExePath();
+    // 见 session.h：这里必须是正斜杠，否则 OpenSSH 的 posix_spawnp 找不到文件
+    for (wchar_t& c : p) {
+        if (c == L'\\') c = L'/';
+    }
+    return p;
+}
+
+bool IsHostKeyKnown(const std::wstring& host, int port) {
+    if (host.empty()) return false;
+
+    std::wstring keygen = FindTool(L"ssh-keygen.exe");
+    if (keygen.empty()) {
+        LogLine(L"IsHostKeyKnown: 没找到 ssh-keygen.exe，按未知处理");
+        return false;
+    }
+
+    // known_hosts 里非标准端口的写法是 [host]:port
+    std::wstring target = host;
+    if (port != 22) target = L"[" + host + L"]:" + std::to_wstring(port);
+
+    std::wstring cmdline = QuoteArg(keygen) + L" -F " + QuoteArg(target);
+    std::vector<wchar_t> mut(cmdline.begin(), cmdline.end());
+    mut.push_back(L'\0');
+
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE | GENERIC_READ,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, 0, nullptr);
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = nul;
+    si.hStdError = nul;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessW(keygen.c_str(), mut.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+
+    if (!ok) {
+        LogLine(L"IsHostKeyKnown: 启动 ssh-keygen 失败 err=%lu", (unsigned long)GetLastError());
+        return false;
+    }
+
+    DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, 5000) == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 1000);
+    } else {
+        GetExitCodeProcess(pi.hProcess, &code);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    bool known = (code == 0);
+    LogLine(L"IsHostKeyKnown: %s -> %s (退出码 %lu)",
+            target.c_str(), known ? L"已知" : L"未知", (unsigned long)code);
+    return known;
+}
 
 // ---------------------------------------------------------------------------
 //  命令行

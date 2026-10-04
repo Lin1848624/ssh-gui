@@ -360,12 +360,23 @@ bool TerminalView::Connect(const Session& s, std::wstring* err) {
     std::wstring rawArgs = L"/c chcp 65001 >nul & " + QuoteArg(ssh);
     for (const auto& a : sshArgs) rawArgs += L" " + QuoteArg(a);
 
-    // 需要自动填密码时准备 askpass 环境
+    // 自动填密码要靠 askpass，但 SSH_ASKPASS_REQUIRE=force 会让 ssh 把
+    // "是否信任这台主机"的确认也丢给 askpass 去答 —— 而 askpass 给的是密码、
+    // 不是 yes，于是直接 Host key verification failed。
+    // 所以：主机密钥还不在 known_hosts 里、且用户没勾"自动信任"时，
+    // 本次不开 askpass，把确认提示留在终端里让用户自己回答。
     std::vector<std::pair<std::wstring, std::wstring>> env;
-    if (!s.password.empty()) {
-        env.emplace_back(L"SSH_ASKPASS", ExePath());
+    bool wantAskPass = !s.password.empty();
+    if (wantAskPass && !s.autoAcceptHostKey && !IsHostKeyKnown(s.host, s.port)) {
+        wantAskPass = false;
+        LogLine(L"主机密钥未知且未启用自动信任，本次不启用 askpass，改由终端手动确认");
+    }
+    if (wantAskPass) {
+        env.emplace_back(L"SSH_ASKPASS", AskPassPath());
         env.emplace_back(L"SSH_ASKPASS_REQUIRE", L"force");
+        env.emplace_back(L"SSH_GUI_ASKPASS", L"1");       // ssh 只传提示串，靠它认出自调用
         env.emplace_back(L"SSH_GUI_PASSWORD", s.password);
+        env.emplace_back(L"SSH_GUI_AUTO_ACCEPT", s.autoAcceptHostKey ? L"1" : L"0");
         env.emplace_back(L"DISPLAY", L":0");
     }
 

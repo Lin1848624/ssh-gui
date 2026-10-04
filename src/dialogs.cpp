@@ -33,6 +33,7 @@ enum : int {
     IDC_CHK_COMPRESS,
     IDC_CHK_KEEPALIVE,
     IDC_CHK_VERBOSE,
+    IDC_CHK_AUTOACCEPT,
     IDC_BTN_OK,
     IDC_BTN_CANCEL,
 };
@@ -113,6 +114,7 @@ struct SessionDlg {
     bool compress = false;
     bool keepAlive = true;
     bool verbose = false;
+    bool autoAccept = false;
     std::vector<PortForward> forwards;
     int fwdSel = -1;
 
@@ -125,6 +127,7 @@ struct SessionDlg {
     HWND edKey = nullptr, edDir = nullptr, edPass = nullptr, edExtra = nullptr;
     HWND lbFwd = nullptr;
     HWND chkSave = nullptr, chkComp = nullptr, chkAlive = nullptr, chkVerbose = nullptr;
+    HWND chkAutoAccept = nullptr;
 };
 
 constexpr const wchar_t* kSessionClass = L"SshGuiSessionDlg";
@@ -170,8 +173,11 @@ void SessionDlgLayout(SessionDlg* d) {
     place(d->edPass, x, y, w - saveW - S(6), h);
     place(d->chkSave, x + w - saveW, y, saveW, h);
 
+    y += S(32);
+    place(d->chkAutoAccept, x, y, w, h);
+
     // 端口转发
-    y += S(46);
+    y += S(40);
     int btnW = S(64);
     place(d->lbFwd, x, y, w - btnW - S(8), S(92));
     place(GetDlgItem(d->hwnd, IDC_BTN_FWD_ADD), x + w - btnW, y, btnW, h);
@@ -249,6 +255,8 @@ void SessionDlgPaint(SessionDlg* d, HDC hdcTarget) {
         label(L"密码", y, nullptr);
         y += S(38);
 
+        y += S(32);   // 让出"首次连接自动信任主机密钥"勾选框那一行
+
         label(L"端口转发", y + S(6), fb);
         y += S(18);
         Gfx::Text(g, L"本地 -L / 远程 -R / 动态 -D（SOCKS5）", f, Theme::TextFaint,
@@ -294,6 +302,9 @@ void SessionDlgCreateControls(SessionDlg* d) {
     d->chkComp = MakeButton(h, IDC_CHK_COMPRESS, L"压缩传输", BS_PUSHBUTTON);
     d->chkAlive = MakeButton(h, IDC_CHK_KEEPALIVE, L"保持连接", BS_PUSHBUTTON);
     d->chkVerbose = MakeButton(h, IDC_CHK_VERBOSE, L"详细日志", BS_PUSHBUTTON);
+    d->chkAutoAccept = MakeButton(h, IDC_CHK_AUTOACCEPT,
+                                  L"首次连接自动信任主机密钥（省去手动输 yes，但会失去中间人防护）",
+                                  BS_PUSHBUTTON);
 
     d->lbFwd = CreateWindowExW(
         0, L"LISTBOX", L"",
@@ -318,10 +329,11 @@ void SessionDlgCreateControls(SessionDlg* d) {
     d->compress  = s.compress;
     d->keepAlive = s.keepAlive;
     d->verbose   = s.verbose;
+    d->autoAccept = s.autoAcceptHostKey;
     d->forwards  = s.forwards;
     SessionDlgRefreshForwards(d);
 
-    int W = S(560), H = S(548);
+    int W = S(560), H = S(580);
     RECT rc = { 0, 0, W, H };
     AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
     SetWindowPos(h, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
@@ -337,6 +349,7 @@ void SessionDlgCreateControls(SessionDlg* d) {
     if (px < 0) px = 0;
     if (py < 0) py = 0;
     SetWindowPos(h, HWND_TOP, px, py, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    ApplyDarkTitleBar(h);   // 显示后再设一次：只在创建时设，DWM 有时会忽略
 
     SessionDlgLayout(d);
 }
@@ -355,6 +368,7 @@ bool SessionDlgCollect(SessionDlg* d) {
     s.compress = d->compress;
     s.keepAlive = d->keepAlive;
     s.verbose = d->verbose;
+    s.autoAcceptHostKey = d->autoAccept;
     s.forwards = d->forwards;
 
     if (s.host.empty()) {
@@ -428,12 +442,14 @@ LRESULT CALLBACK SessionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!dis) return FALSE;
 
         if (dis->CtlID == IDC_CHK_SAVEPASS || dis->CtlID == IDC_CHK_COMPRESS ||
-            dis->CtlID == IDC_CHK_KEEPALIVE || dis->CtlID == IDC_CHK_VERBOSE) {
+            dis->CtlID == IDC_CHK_KEEPALIVE || dis->CtlID == IDC_CHK_VERBOSE ||
+            dis->CtlID == IDC_CHK_AUTOACCEPT) {
 
             bool checked = (dis->CtlID == IDC_CHK_SAVEPASS) ? d->savePass
                          : (dis->CtlID == IDC_CHK_COMPRESS) ? d->compress
                          : (dis->CtlID == IDC_CHK_KEEPALIVE) ? d->keepAlive
-                                                             : d->verbose;
+                         : (dis->CtlID == IDC_CHK_VERBOSE) ? d->verbose
+                                                           : d->autoAccept;
             RECT rc = dis->rcItem;
             bool hovered = ButtonHovered(dis->hwndItem);
 
@@ -499,6 +515,10 @@ LRESULT CALLBACK SessionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_CHK_VERBOSE:
             d->verbose = !d->verbose;
             InvalidateRect(d->chkVerbose, nullptr, TRUE);
+            return 0;
+        case IDC_CHK_AUTOACCEPT:
+            d->autoAccept = !d->autoAccept;
+            InvalidateRect(d->chkAutoAccept, nullptr, TRUE);
             return 0;
 
         case IDC_BTN_BROWSE_KEY: {
@@ -627,6 +647,7 @@ bool EditSessionDialog(HWND parent, Session& s, bool isNew) {
     if (sys) EnableMenuItem(sys, SC_CLOSE, MF_BYCOMMAND | MF_ENABLED);
 
     ShowWindow(h, SW_SHOW);
+    ApplyDarkTitleBar(h);   // 显示后再设一次：只在创建时设，DWM 有时会忽略
     UpdateWindow(h);
     SetFocus(d.edHost);
 
@@ -815,6 +836,7 @@ LRESULT CALLBACK FwdDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (px < 0) px = 0;
         if (py < 0) py = 0;
         SetWindowPos(hwnd, HWND_TOP, px, py, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+        ApplyDarkTitleBar(hwnd);
 
         FwdDlgLayout(d);
         FwdDlgUpdateEnabled(d);
@@ -980,6 +1002,7 @@ bool ForwardDialog(HWND parent, PortForward& f) {
 
     ApplyDarkTitleBar(h);
     ShowWindow(h, SW_SHOW);
+    ApplyDarkTitleBar(h);
     UpdateWindow(h);
 
     EnableWindow(parent, FALSE);
@@ -1180,6 +1203,7 @@ bool SimpleInputBox(HWND parent, const wchar_t* title, const wchar_t* prompt,
     if (px < 0) px = 0;
     if (py < 0) py = 0;
     SetWindowPos(h, HWND_TOP, px, py, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    ApplyDarkTitleBar(h);   // 显示后再设一次：只在创建时设，DWM 有时会忽略
 
     EnableWindow(parent, FALSE);
 

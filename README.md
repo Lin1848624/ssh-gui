@@ -184,6 +184,38 @@ ssh 继承同一个控制台对象，于是输入输出都按 UTF-8 走。
 `WM_MOUSEWHEEL` 的 delta 为正表示滚轮向前（远离用户），对应**往上看历史**，
 视口偏移要**增大**。写反的表现是滚轮完全没反应（偏移被钳在 0）。
 
+### 10. `SSH_ASKPASS` 必须是正斜杠路径
+
+自动填密码靠 `SSH_ASKPASS` 指向本程序。OpenSSH 启动它时走的是 `posix_spawnp`，
+而 `posix_spawnp` 按 POSIX 规则判断"文件名里有没有 `/`"——`C:\path\x.exe` 只有反斜杠，
+于是被当成命令名去 `PATH` 里找，必然失败：
+
+```
+CreateProcessW failed error:2
+ssh_askpass: posix_spawnp: No such file or directory
+```
+
+把路径里的 `\` 全换成 `/` 就对了（Windows 的 `CreateProcessW` 两种都认）。
+
+### 11. `SSH_ASKPASS_REQUIRE=force` 会把主机密钥确认也交给 askpass
+
+`force` 的含义是"所有需要读取输入的地方都用 askpass"，**包括**首次连接时的
+`Are you sure you want to continue connecting (yes/no/[fingerprint])?`。
+而 askpass 回答的是密码而不是 `yes`，结果就是：
+
+```
+Host key verification failed.
+```
+
+现在的处理是：**主机密钥还不在 `known_hosts` 里、且用户没勾"自动信任"时，本次不启用
+askpass**，把确认提示留在终端里让用户自己回答；否则才启用自动填密码。
+
+### 12. askpass 靠环境变量认自己
+
+ssh 调用 askpass 时**只把提示串当参数传过去**（例如 `"user@host's password: "`），
+不会传任何自定义开关。所以不能用"命令行里有没有 `--askpass`"来判断自己是不是被当
+askpass 拉起来的 —— 得看环境变量（启动 ssh 时放进环境块，ssh 会原样传给子进程）。
+
 ---
 
 ## 配置文件
@@ -192,6 +224,9 @@ ssh 继承同一个控制台对象，于是输入输出都按 UTF-8 走。
 | --- | --- | --- |
 | 会话配置 | `%LOCALAPPDATA%\SshGui\sessions.json` | UTF-8 JSON，可直接手工编辑 |
 | 运行日志 | `%LOCALAPPDATA%\SshGui\sshgui.log` | 超过 2 MB 自动轮转成 `.log.1` |
+
+设环境变量 `SSH_GUI_DATA_DIR` 可以把这两样挪到别的目录（自动化测试用它做隔离，
+免得测试脚本把真实会话配置覆盖掉）。
 
 密码字段是用 DPAPI 加密后的 `dpapi:<base64>`，只能在保存它的那个 Windows 用户下解开。
 
@@ -225,12 +260,27 @@ ssh 继承同一个控制台对象，于是输入输出都按 UTF-8 走。
 系统里 `cmd.exe` 或代码页设置异常。
 
 **首次连接弹指纹确认，能自动接受吗？**
-在会话的「额外参数」里填 `-o StrictHostKeyChecking=accept-new`。
-默认保持与命令行 ssh 一致的手动确认，避免中间人风险。
+勾选会话里的「首次连接自动信任主机密钥」即可，也可以在「额外参数」里填
+`-o StrictHostKeyChecking=accept-new`。默认保持与命令行 ssh 一致的手动确认，
+避免中间人风险。
 
 **能保存密码吗？**
 可以。勾选「保存密码」后会用 DPAPI 加密存盘，并在连接时通过 `SSH_ASKPASS` 自动填入。
 不勾选则每次在终端里手输。
+
+有一点要注意：**首次连接某台主机时仍需要手动确认主机密钥并在终端里输一次密码**，
+因为此时 ssh 会先问"是否信任这台主机"，而这个问题不该由自动填密码的通道替你回答
+（那等于关掉中间人防护）。确认过一次之后，之后每次连接都会自动填密码。
+
+如果你想首次连接就全自动，勾上会话里的
+**「首次连接自动信任主机密钥」**（等价于 `StrictHostKeyChecking=accept-new`），
+或者在「额外参数」里自己填这个选项。它的代价是：首次连接不校验对端身份。
+
+**保存密码后连不上，提示 `ssh_askpass` 或 `Host key verification failed`？**
+1.0.0 有这个 bug（`SSH_ASKPASS` 用了反斜杠路径，且主机密钥确认被交给 askpass 代答），
+1.0.1 已修复。若仍失败，把程序移到不含中文和空格的目录下再试
+（OpenSSH 内部对非 ASCII 路径的处理不一定可靠），并把
+`%LOCALAPPDATA%\SshGui\sshgui.log` 一并提供。
 
 **支持密钥认证吗？**
 支持。「私钥文件」填私钥路径即可（会带 `-i` 和 `IdentitiesOnly=yes`）。

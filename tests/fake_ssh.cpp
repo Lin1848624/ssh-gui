@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 static HANDLE g_out = INVALID_HANDLE_VALUE;
 
@@ -176,6 +177,7 @@ static void ShowHelp() {
     OutW(L"    big       输出 200 行，测试滚动回看\r\n");
     OutW(L"    alt       备用屏切换\r\n");
     OutW(L"    title     设置窗口标题\r\n");
+    OutW(L"    askpass   检查自动填密码（askpass）链路\r\n");
     OutW(L"    exit      退出（返回码 0）\r\n");
     OutW(L"    其他      原样回显（验证键盘与粘贴）\r\n\r\n");
 }
@@ -194,6 +196,95 @@ static void ShowBox() {
 }
 
 // ---------------------------------------------------------------------------
+//  askpass 链路实测
+//
+//  模拟 ssh 的两种调用：一次用密码提示串，一次用主机密钥确认提示串。
+//  重点看 SSH_ASKPASS 里是不是正斜杠 —— OpenSSH 用 posix_spawnp 启动它，
+//  反斜杠路径不含 "/"，会被当成命令名去 PATH 里找，必然报 No such file or directory。
+// ---------------------------------------------------------------------------
+static std::string RunAskPassWith(const std::wstring& exe, const std::wstring& prompt) {
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return "<CreatePipe failed>";
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    std::wstring cmd = L"\"" + exe + L"\" \"" + prompt + L"\"";
+    std::vector<wchar_t> mut(cmd.begin(), cmd.end());
+    mut.push_back(L'\0');
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nullptr;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessW(exe.c_str(), mut.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    if (!ok) {
+        DWORD e = GetLastError();
+        CloseHandle(rd);
+        char b[64];
+        _snprintf_s(b, sizeof(b), _TRUNCATE, "<CreateProcess failed err=%lu>", (unsigned long)e);
+        return b;
+    }
+
+    std::string out;
+    char buf[512];
+    DWORD got = 0;
+    while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
+    CloseHandle(rd);
+
+    WaitForSingleObject(pi.hProcess, 5000);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    char tail[32];
+    _snprintf_s(tail, sizeof(tail), _TRUNCATE, "   [exit=%lu]", (unsigned long)code);
+    return out + tail;
+}
+
+static void ShowAskPassCheck() {
+    OutW(L"\r\n  --- askpass 链路检查 ---\r\n");
+
+    wchar_t ap[1024] = {};
+    DWORD n = GetEnvironmentVariableW(L"SSH_ASKPASS", ap, 1024);
+    if (n == 0 || n >= 1024) {
+        OutW(L"  SSH_ASKPASS 未设置 —— 本次会话没有启用自动填密码\r\n");
+        OutW(L"  （主机密钥未知且未勾选自动信任时就是这样，属预期行为）\r\n");
+        OutW(L"  ------------------------\r\n\r\n");
+        return;
+    }
+
+    OutW(L"  SSH_ASKPASS = ");
+    OutW(ap);
+    OutW(L"\r\n");
+    Out(std::string("  路径里含反斜杠: ") +
+        (wcschr(ap, L'\\') ? "是  <== 有问题，posix_spawnp 会找不到" : "否  <== 正确"));
+
+    wchar_t v[128] = {};
+    GetEnvironmentVariableW(L"SSH_GUI_ASKPASS", v, 128);
+    Out(std::string("  SSH_GUI_ASKPASS = ") + (v[0] ? "已设置" : "未设置"));
+    v[0] = 0;
+    GetEnvironmentVariableW(L"SSH_GUI_AUTO_ACCEPT", v, 128);
+    Out(std::string("  SSH_GUI_AUTO_ACCEPT = ") + (v[0] ? "1" : "0"));
+
+    OutW(L"\r\n  以密码提示调用: ");
+    Out(RunAskPassWith(ap, L"u0_a408@192.168.1.225's password: "));
+    OutW(L"\r\n  以主机确认提示调用: ");
+    Out(RunAskPassWith(ap, L"(yes/no/[fingerprint])? "));
+    OutW(L"\r\n  ------------------------\r\n\r\n");
+}
+
+// ---------------------------------------------------------------------------
 static void HandleCommand(const std::string& cmdUtf8) {
     // 简单起见按 UTF-8 字节比较 ASCII 命令
     if (cmdUtf8 == "exit" || cmdUtf8 == "quit") {
@@ -201,6 +292,8 @@ static void HandleCommand(const std::string& cmdUtf8) {
         ExitProcess(0);
     } else if (cmdUtf8 == "help") {
         ShowHelp();
+    } else if (cmdUtf8 == "askpass") {
+        ShowAskPassCheck();
     } else if (cmdUtf8 == "color") {
         ShowColors();
     } else if (cmdUtf8 == "true") {

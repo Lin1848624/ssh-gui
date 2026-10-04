@@ -46,6 +46,7 @@ struct Session {
     bool         compress  = false;
     bool         verbose   = false;
     bool         keepAlive = true;
+    bool         autoAcceptHostKey = false;  // 首次连接自动信任主机密钥（存在中间人风险）
 
     std::vector<PortForward> forwards;
 
@@ -73,6 +74,16 @@ public:
 // ---------------------------------------------------------------------------
 std::wstring FindSshExe();                // 完整路径；空 = 没找到
 std::wstring FindSftpExe();
+
+// 供 SSH_ASKPASS 使用的自身路径。**必须把反斜杠换成正斜杠**：
+// OpenSSH 用 posix_spawnp 启动 askpass，而它按 POSIX 规则判断"文件名里有没有 /"——
+// `C:\path\x.exe` 不含正斜杠，会被当成命令名去 PATH 里找，必然失败
+// （症状就是 ssh_askpass: posix_spawnp: No such file or directory）。
+std::wstring AskPassPath();
+
+// 主机密钥是否已在 known_hosts 里。用 `ssh-keygen -F` 查询，
+// 能正确处理 HashKnownHosts 与非标准端口的 [host]:port 写法。
+bool IsHostKeyKnown(const std::wstring& host, int port);
 
 // ---------------------------------------------------------------------------
 //  命令行构造

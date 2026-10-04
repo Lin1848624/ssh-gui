@@ -105,6 +105,17 @@ std::wstring ExeDir() {
 }
 
 std::wstring AppDataDir() {
+    // 允许用环境变量把数据目录挪到别处。
+    // 自动化测试必须用它：否则测试脚本写 sessions.json 会把用户真实的
+    // 会话配置（含 DPAPI 密码密文）直接覆盖掉。
+    wchar_t ov[MAX_PATH * 2] = {};
+    DWORD on = GetEnvironmentVariableW(L"SSH_GUI_DATA_DIR", ov, MAX_PATH * 2);
+    if (on > 0 && on < MAX_PATH * 2) {
+        std::wstring dir(ov);
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir;
+    }
+
     wchar_t buf[MAX_PATH * 2] = {};
     // CSIDL_LOCAL_APPDATA == 0x1C
     if (FAILED(SHGetFolderPathW(nullptr, 0x001C, nullptr, 0, buf))) return std::wstring();
