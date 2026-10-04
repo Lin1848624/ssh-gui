@@ -1,0 +1,11 @@
+obj/
+bin/
+*.obj
+*.res
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+.vs/
+build/
