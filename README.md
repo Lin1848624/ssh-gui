@@ -6,7 +6,12 @@ Windows 上的图形化 SSH 终端。纯 C++ / Win32 + GDI+ 写的原生程序�
 GUI 框架或网络库；SSH 协议本身交给系统自带的 OpenSSH 客户端，界面通过 ConPTY
 把它当成一个真终端来驱动。
 
-**单个 exe，约 540 KB，拷贝即用**（静态链接 CRT，不需要装运行库）。
+**单个 exe，约 546 KB，拷贝即用**（静态链接 CRT，不需要装运行库）。
+
+## 下载
+
+[**前往 Releases 下载最新版**](https://github.com/Lin1848624/ssh-gui/releases/latest) ——
+下载 `SshGui.exe` 双击即可运行，无需安装。
 
 ---
 
