@@ -8,8 +8,11 @@
 
 #include <commctrl.h>
 #include <gdiplus.h>
+#include <imm.h>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "imm32.lib")
 
 using namespace Gdiplus;
 
@@ -26,6 +29,7 @@ enum : int {
     IDC_ED_DIR,
     IDC_ED_PASS,
     IDC_CHK_SAVEPASS,
+    IDC_CHK_SHOWPASS,
     IDC_LB_FWD,
     IDC_BTN_FWD_ADD,
     IDC_BTN_FWD_DEL,
@@ -111,6 +115,7 @@ struct SessionDlg {
     bool isNew = false;
     bool ok = false;
     bool savePass = false;
+    bool showPass = false;
     bool compress = false;
     bool keepAlive = true;
     bool verbose = false;
@@ -127,6 +132,7 @@ struct SessionDlg {
     HWND edKey = nullptr, edDir = nullptr, edPass = nullptr, edExtra = nullptr;
     HWND lbFwd = nullptr;
     HWND chkSave = nullptr, chkComp = nullptr, chkAlive = nullptr, chkVerbose = nullptr;
+    HWND chkShowPass = nullptr;
     HWND chkAutoAccept = nullptr;
 };
 
@@ -170,7 +176,9 @@ void SessionDlgLayout(SessionDlg* d) {
 
     y += S(38);
     int saveW = S(96);
-    place(d->edPass, x, y, w - saveW - S(6), h);
+    int showW = S(96);
+    place(d->edPass, x, y, w - saveW - showW - S(12), h);
+    place(d->chkShowPass, x + w - saveW - showW - S(6), y, showW, h);
     place(d->chkSave, x + w - saveW, y, saveW, h);
 
     y += S(32);
@@ -299,6 +307,12 @@ void SessionDlgCreateControls(SessionDlg* d) {
     MakeButton(h, IDC_BTN_BROWSE_KEY, L"浏览...", BS_PUSHBUTTON);
 
     d->chkSave = MakeButton(h, IDC_CHK_SAVEPASS, L"保存密码", BS_PUSHBUTTON);
+    d->chkShowPass = MakeButton(h, IDC_CHK_SHOWPASS, L"显示密码", BS_PUSHBUTTON);
+
+    // 密码框禁用输入法：中文/全角状态下敲进去的字符会被输入法替换成别的
+    // 码位，存下来的就不是用户以为的那个密码了（真实踩过：存成了
+    // 汉字偏旁+韩文字母的混合乱码，命令行手输能登、程序喂的密码登不上）。
+    ImmAssociateContext(d->edPass, nullptr);
     d->chkComp = MakeButton(h, IDC_CHK_COMPRESS, L"压缩传输", BS_PUSHBUTTON);
     d->chkAlive = MakeButton(h, IDC_CHK_KEEPALIVE, L"保持连接", BS_PUSHBUTTON);
     d->chkVerbose = MakeButton(h, IDC_CHK_VERBOSE, L"详细日志", BS_PUSHBUTTON);
@@ -389,7 +403,30 @@ bool SessionDlgCollect(SessionDlg* d) {
         s.port = port;
     }
 
-    if (!s.savePassword) s.password.clear();
+    if (!s.savePassword) {
+        s.password.clear();
+    } else if (!s.password.empty()) {
+        // 密码里混进非 ASCII 字符，几乎总是输入法惹的祸：中文/全角状态下
+        // 敲进去的字符会被替换成别的码位，用户以为存的是原密码，实际存下来
+        // 的是乱码。真实踩过：命令行手输能登录，程序喂的密码登不上，解出来
+        // 是汉字偏旁 + 韩文字母 + 亚美尼亚字母的混合体。
+        bool nonAscii = false;
+        for (wchar_t c : s.password) {
+            if (c > 127) { nonAscii = true; break; }
+        }
+        if (nonAscii) {
+            int r = MessageBoxW(d->hwnd,
+                L"这个密码里含有非 ASCII 字符（中文、全角符号等）。\n\n"
+                L"如果不是有意为之，多半是输入法处在中文/全角状态造成的。\n"
+                L"可以先勾选「显示密码」核对一下。\n\n"
+                L"仍然保存这个密码吗？",
+                L"密码含非 ASCII 字符", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+            if (r != IDYES) {
+                SetFocus(d->edPass);
+                return false;
+            }
+        }
+    }
     if (s.name.empty()) s.name = s.Target();
     return true;
 }
@@ -443,13 +480,13 @@ LRESULT CALLBACK SessionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         if (dis->CtlID == IDC_CHK_SAVEPASS || dis->CtlID == IDC_CHK_COMPRESS ||
             dis->CtlID == IDC_CHK_KEEPALIVE || dis->CtlID == IDC_CHK_VERBOSE ||
-            dis->CtlID == IDC_CHK_AUTOACCEPT) {
+            dis->CtlID == IDC_CHK_AUTOACCEPT || dis->CtlID == IDC_CHK_SHOWPASS) {
 
             bool checked = (dis->CtlID == IDC_CHK_SAVEPASS) ? d->savePass
                          : (dis->CtlID == IDC_CHK_COMPRESS) ? d->compress
                          : (dis->CtlID == IDC_CHK_KEEPALIVE) ? d->keepAlive
                          : (dis->CtlID == IDC_CHK_VERBOSE) ? d->verbose
-                                                           : d->autoAccept;
+                                                           : (dis->CtlID == IDC_CHK_SHOWPASS) ? d->showPass : d->autoAccept;
             RECT rc = dis->rcItem;
             bool hovered = ButtonHovered(dis->hwndItem);
 
@@ -515,6 +552,13 @@ LRESULT CALLBACK SessionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_CHK_VERBOSE:
             d->verbose = !d->verbose;
             InvalidateRect(d->chkVerbose, nullptr, TRUE);
+            return 0;
+        case IDC_CHK_SHOWPASS:
+            d->showPass = !d->showPass;
+            SendMessageW(d->edPass, EM_SETPASSWORDCHAR,
+                         (WPARAM)(d->showPass ? 0 : L'\x25CF'), 0);
+            InvalidateRect(d->edPass, nullptr, TRUE);
+            InvalidateRect(d->chkShowPass, nullptr, TRUE);
             return 0;
         case IDC_CHK_AUTOACCEPT:
             d->autoAccept = !d->autoAccept;
