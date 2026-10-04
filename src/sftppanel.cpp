@@ -53,6 +53,12 @@ static std::string ToRemotePath(const std::wstring& w) {
     return u8;
 }
 
+namespace {
+// 实现在下面同一个匿名命名空间里；RunSftpBatch 要用，所以先声明
+std::wstring FirstErrorLine(const std::string& output);
+bool LooksLikeCommandFailure(const std::string& output);
+}
+
 bool RunSftpBatch(const Session& s,
                   const std::string& commands,
                   std::string& output,
@@ -175,10 +181,23 @@ bool RunSftpBatch(const Session& s,
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    if (code != 0 && err && err->empty()) {
+    bool ok = (code == 0);
+
+    // 交互模式下单条命令失败**不会**改变退出码 —— 最后那条 quit 照样让 sftp
+    // 返回 0。所以光看退出码会把"新建目录失败""删除失败"全当成成功，
+    // 还得从输出里认失败迹象。
+    if (ok && LooksLikeCommandFailure(output)) {
+        ok = false;
+        if (err && err->empty()) {
+            std::wstring line = FirstErrorLine(output);
+            *err = line.empty() ? L"远程命令执行失败。" : line;
+        }
+    }
+
+    if (!ok && err && err->empty()) {
         *err = L"sftp 退出码 " + std::to_wstring(code) + L"。";
     }
-    return code == 0;
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +304,29 @@ std::wstring FirstErrorLine(const std::string& output) {
         pos = end + 1;
     }
     return std::wstring();
+}
+
+// 交互模式下单条命令失败不改退出码，只能从输出里认。
+// 这里只认 sftp 自己那几种固定措辞，避免把文件名的巧合当成失败。
+bool LooksLikeCommandFailure(const std::string& output) {
+    static const char* marks[] = {
+        "\": Failure",              // remote mkdir "/x": Failure
+        "remote mkdir",             // 同上（前缀）
+        "remote rmdir",
+        "remote rename",
+        "remote remove",
+        "Couldn't ",                // Couldn't stat / Couldn't read directory
+        "No such file or directory",
+        "Permission denied",
+        "not a directory",
+        "Invalid command",
+        "Bad message",
+        "File not found",
+    };
+    for (const char* m : marks) {
+        if (output.find(m) != std::string::npos) return true;
+    }
+    return false;
 }
 
 } // namespace

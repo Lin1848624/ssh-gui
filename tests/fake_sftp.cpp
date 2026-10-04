@@ -208,10 +208,11 @@ int main(int argc, char** argv) {
         } else if (line.compare(0, 3, "get") == 0) {
             Out("Fetching data from remote\r\n");
         } else if (line.compare(0, 5, "mkdir") == 0) {
-            // 故意让已存在的目录名报错，验证错误路径
+            // 故意让已存在的目录名报错，验证"失败但不改退出码"这条路径
+            // （交互模式下真 sftp 就是这样：报错归报错，最后 quit 仍返回 0）
             if (line.find("exists") != std::string::npos) {
                 Out("remote mkdir \"" + Unquote(Trim(line.substr(5))) + "\": Failure\r\n");
-                return 1;
+                continue;
             }
             Out("Created directory\r\n");
         } else if (line.compare(0, 3, "rm ") == 0 || line.compare(0, 3, "rm\t") == 0) {
