@@ -293,13 +293,19 @@ bool SftpListDir(const Session& s, const std::string& path,
 
     std::string output;
     if (!RunSftpBatch(s, cmds, output, err)) {
-        // 认证失败是最常见的一种，而且用户看到 "Permission denied" 通常不知道该做什么：
-        // SFTP 是另起的进程，终端里手输的密码不会共享给它，只能在会话里存密码。
+        // 认证失败是最常见的一种。要分两种情况给话：压根没存密码，和
+        // 存了密码但被服务器拒了 —— 后者再劝用户"去填密码"就是误导。
         if (output.find("Permission denied") != std::string::npos ||
             output.find("Authentication failed") != std::string::npos) {
             if (err) {
-                *err = L"认证失败。文件传输是另起一个连接，终端里手输的密码不会共享给它 —— "
-                       L"请「编辑」此会话，勾选「保存密码」并填入密码后重试。";
+                if (s.password.empty()) {
+                    *err = L"认证失败。文件传输是另起一个连接，终端里手输的密码不会共享给它 —— "
+                           L"请「编辑」此会话，勾选「保存密码」并填入密码后重试。";
+                } else {
+                    *err = L"认证失败。已用保存的密码去连，但服务器拒绝了 —— "
+                           L"请确认密码是否正确（在「编辑」里重输一次），"
+                           L"以及该服务器是否允许密码登录。";
+                }
             }
         } else if (err && err->empty()) {
             std::wstring e = FirstErrorLine(output);

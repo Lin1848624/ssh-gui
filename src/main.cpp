@@ -1007,13 +1007,22 @@ static int RunAskPass() {
         LocalFree(argv);
     }
 
+    LogLine(L"askpass 被调用；argc=%d prompt='%s'", argc, prompt.c_str());
+
     auto emit = [](const std::wstring& s) -> int {
         std::string u8 = WideToUtf8(s);
         u8 += "\n";
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (h == INVALID_HANDLE_VALUE || h == nullptr) return 1;
+        if (h == INVALID_HANDLE_VALUE || h == nullptr) {
+            LogLine(L"askpass: 没有有效的 stdout 句柄");
+            return 1;
+        }
         DWORD wrote = 0;
-        if (!WriteFile(h, u8.data(), (DWORD)u8.size(), &wrote, nullptr)) return 1;
+        if (!WriteFile(h, u8.data(), (DWORD)u8.size(), &wrote, nullptr)) {
+            LogLine(L"askpass: 写 stdout 失败 err=%lu", (unsigned long)GetLastError());
+            return 1;
+        }
+        LogLine(L"askpass: 已写出 %lu 字节", (unsigned long)wrote);
         return 0;
     };
 
@@ -1022,6 +1031,7 @@ static int RunAskPass() {
         wchar_t flag[8] = {};
         bool autoAccept = GetEnvironmentVariableW(L"SSH_GUI_AUTO_ACCEPT", flag, 8) > 0 &&
                           flag[0] == L'1';
+        LogLine(L"askpass: 这是主机密钥确认提示，自动信任=%d", (int)autoAccept);
         if (!autoAccept) {
             // 不代答：让 ssh 报失败，用户回终端里自己确认主机指纹
             return 1;
@@ -1031,6 +1041,7 @@ static int RunAskPass() {
 
     wchar_t buf[1024] = {};
     DWORD n = GetEnvironmentVariableW(L"SSH_GUI_PASSWORD", buf, 1024);
+    LogLine(L"askpass: 密码提示，SSH_GUI_PASSWORD 长度=%lu", (unsigned long)n);
     if (n == 0 || n >= 1024) return 1;
     return emit(buf);
 }
@@ -1045,9 +1056,12 @@ static int RunAskPass() {
 // ---------------------------------------------------------------------------
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nCmdShow) {
-    // 被 ssh 当作 askpass 拉起来时，命令行里只有提示串，所以看环境变量
+    // 被 ssh 当作 askpass 拉起来时，命令行里只有提示串，所以看环境变量。
+    // 这里必须先调 LogInit，否则 askpass 进程一个字都不留，出问题时完全看不见。
     wchar_t askFlag[8] = {};
     if (GetEnvironmentVariableW(L"SSH_GUI_ASKPASS", askFlag, 8) > 0) {
+        LogInit();
+        LogLine(L"以 askpass 模式启动 (pid=%lu)", (unsigned long)GetCurrentProcessId());
         return RunAskPass();
     }
 
