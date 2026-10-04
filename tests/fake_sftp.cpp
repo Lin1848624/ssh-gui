@@ -73,12 +73,25 @@ static std::vector<Entry> ListingFor(const std::string& path) {
     return v;
 }
 
+// 由环境变量控制的模拟开关：
+//   FAKE_SFTP_STYLE=toybox  用 Android/toybox 的 ISO 日期写法（7 个字段）
+//   FAKE_SFTP_NO_REALPATH=1 让 realpath 命令失败（老服务器没有这个 sftp 命令）
+static bool g_toyboxStyle = false;
+static bool g_noRealpath = false;
+
 static void EmitListing(const std::string& path) {
     for (const auto& e : ListingFor(path)) {
         char buf[512];
-        _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-                    "%s %3u %-8s %-8s %8llu %s %2s %s %s\r\n",
-                    e.perm, e.links, e.owner, e.group, e.size, e.mon, e.day, e.time, e.name);
+        if (g_toyboxStyle) {
+            // Android toybox 风格："2024-01-01 12:00"，日期和时间各占一个字段
+            _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+                        "%s %3u %-8s %-8s %8llu 2024-01-01 12:00 %s\r\n",
+                        e.perm, e.links, e.owner, e.group, e.size, e.name);
+        } else {
+            _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+                        "%s %3u %-8s %-8s %8llu %s %2s %s %s\r\n",
+                        e.perm, e.links, e.owner, e.group, e.size, e.mon, e.day, e.time, e.name);
+        }
         Out(buf);
     }
 }
@@ -89,6 +102,18 @@ int main(int argc, char** argv) {
 
     g_out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (g_out == INVALID_HANDLE_VALUE || g_out == nullptr) return 1;
+
+    {
+        char v[32] = {};
+        if (GetEnvironmentVariableA("FAKE_SFTP_STYLE", v, sizeof(v)) > 0 &&
+            _stricmp(v, "toybox") == 0) {
+            g_toyboxStyle = true;
+        }
+        v[0] = 0;
+        if (GetEnvironmentVariableA("FAKE_SFTP_NO_REALPATH", v, sizeof(v)) > 0 && v[0] == '1') {
+            g_noRealpath = true;
+        }
+    }
 
     (void)argc;
     (void)argv;
@@ -115,12 +140,21 @@ int main(int argc, char** argv) {
         }
         if (line.empty()) continue;
 
-        // 去掉开头的 '-'（sftp 的忽略错误前缀）
-        if (line[0] == '-') line = Trim(line.substr(1));
+        // sftp 的 '-' 前缀表示"这条命令失败也不要中止整批"，
+        // 判断与中止都由客户端负责，这里照实模拟
+        bool ignoreError = false;
+        if (!line.empty() && line[0] == '-') {
+            ignoreError = true;
+            line = Trim(line.substr(1));
+        }
 
         if (line.compare(0, 8, "realpath") == 0) {
-            std::string p = Trim(line.substr(8));
-            p = Unquote(p);
+            std::string p = Unquote(Trim(line.substr(8)));
+            if (g_noRealpath) {
+                Out("realpath \"" + p + "\": No such file or directory\r\n");
+                if (!ignoreError) return 1;   // 没有 '-' 前缀就该整批中止
+                continue;
+            }
             if (p.empty() || p == ".")      Out("/home/test\r\n");
             else if (p[0] == '/')           Out(p + "\r\n");
             else                            Out("/home/test/" + p + "\r\n");

@@ -186,6 +186,17 @@ bool NextField(const std::string& s, size_t& i, std::string& out) {
     return true;
 }
 
+// 三个字母的月份缩写（GNU ls 的日期写法）
+bool IsMonthAbbrev(const std::string& s) {
+    static const char* m[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    if (s.size() != 3) return false;
+    for (const char* x : m) {
+        if (_stricmp(s.c_str(), x) == 0) return true;
+    }
+    return false;
+}
+
 bool ParseLsLine(const std::string& raw, SftpEntry& e) {
     std::string line = raw;
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
@@ -199,14 +210,27 @@ bool ParseLsLine(const std::string& raw, SftpEntry& e) {
     std::string perms = line.substr(0, firstSp);
 
     size_t i = firstSp;
-    std::string links, owner, group, sizeStr, month, day, timestr;
+    std::string links, owner, group, sizeStr, f6, f7, f8;
     if (!NextField(line, i, links))   return false;
     if (!NextField(line, i, owner))   return false;
     if (!NextField(line, i, group))   return false;
     if (!NextField(line, i, sizeStr)) return false;
-    if (!NextField(line, i, month))   return false;
-    if (!NextField(line, i, day))     return false;
-    if (!NextField(line, i, timestr)) return false;
+    if (!NextField(line, i, f6))      return false;
+
+    // 日期有两种写法，字段数不同，不能写死：
+    //   GNU/OpenSSH sftp ："Jan  1 12:00"   -> 月 日 时间（3 个字段）
+    //   Android toybox  ："2024-01-01 12:00" -> 日期 时间（2 个字段）
+    // 以前按 3 个字段硬解析，于是 toybox 那种格式会把文件名当成时间字段吃掉，
+    // 判定为解析失败，整个目录就一项都列不出来。
+    std::string when;
+    if (IsMonthAbbrev(f6)) {
+        if (!NextField(line, i, f7)) return false;   // day
+        if (!NextField(line, i, f8)) return false;   // time
+        when = f6 + " " + f7 + " " + f8;
+    } else {
+        if (!NextField(line, i, f7)) return false;   // time
+        when = f6 + " " + f7;
+    }
 
     while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
     std::string name = line.substr(i);
@@ -222,7 +246,7 @@ bool ParseLsLine(const std::string& raw, SftpEntry& e) {
     e.isDir  = (t == 'd');
     e.isLink = isLink;
     e.size   = strtoull(sizeStr.c_str(), nullptr, 10);
-    e.date   = Utf8ToWide(month + " " + day + " " + timestr);
+    e.date   = Utf8ToWide(when);
     return true;
 }
 
@@ -264,7 +288,10 @@ bool SftpListDir(const Session& s, const std::string& path,
     std::string target = path.empty() ? std::string(".") : path;
 
     std::string cmds;
-    cmds += "realpath " + EscapeSftpPath(target) + "\n";
+    // 两条都加 '-' 前缀：批处理模式下命令失败会立刻中止整批，
+    // 而 realpath 是 OpenSSH 6.4+ 才有的 sftp 命令，Android/dropbear 一类
+    // 服务器上可能压根没有 —— 那样连后面的 ls 都执行不到，界面上就是一片空白。
+    cmds += "-realpath " + EscapeSftpPath(target) + "\n";
     cmds += "-ls -l " + EscapeSftpPath(target) + "\n";
 
     std::string output;
@@ -273,6 +300,9 @@ bool SftpListDir(const Session& s, const std::string& path,
             std::wstring e = FirstErrorLine(output);
             *err = e.empty() ? L"sftp 执行失败。" : e;
         }
+        // 把 sftp 的原始输出完整留下来，否则排查时只剩一句无信息量的退出码
+        LogLine(L"SftpListDir('%S') 失败；sftp 原始输出(%d 字节)：\n%S",
+                target.c_str(), (int)output.size(), output.c_str());
         return false;
     }
 
@@ -324,6 +354,14 @@ bool SftpListDir(const Session& s, const std::string& path,
         if (!base.empty() && base.back() != '/') base += '/';
         e.path = base + WideToUtf8(e.name);
     }
+
+    // 列不出东西时把原始输出记下来：这种情况多半是服务器端没有 sftp 子系统、
+    // 或者 ls 输出格式不是我们认得的（Android 上的 toybox ls 就是另一套）
+    if (out.empty()) {
+        LogLine(L"SftpListDir('%S') 成功但 0 项，abs='%S'；sftp 原始输出(%d 字节)：\n%S",
+                target.c_str(), absPath.c_str(), (int)output.size(), output.c_str());
+    }
+
     return true;
 }
 
@@ -451,6 +489,7 @@ private:
 
     std::wstring m_status;
     bool         m_statusErr = false;
+    std::wstring m_remoteError;   // 远程列目录失败的原因；非空时直接顶掉路径那一行显示
 
     std::shared_ptr<std::atomic<bool>> m_alive;
     std::atomic<bool> m_busy{false};
@@ -632,8 +671,14 @@ void SftpWindow::Paint(HDC hdcTarget) {
 
         Gfx::Text(g, L"远程  " + m_session.Target(), fb, Theme::Text,
                   RectF((REAL)(W / 2 + S(12)), (REAL)S(8), (REAL)(W / 2 - S(24)), (REAL)S(18)), 0, 1);
-        Gfx::Text(g, Utf8ToWide(m_remotePath), f, Theme::TextDim,
-                  RectF((REAL)(W / 2 + S(12)), (REAL)S(28), (REAL)(W / 2 - S(24)), (REAL)S(20)), 0, 1);
+        // 出错时用错误信息顶掉路径那一行，用户一眼就能看到原因
+        if (!m_remoteError.empty()) {
+            Gfx::Text(g, L"✗ " + m_remoteError, f, Theme::Err,
+                      RectF((REAL)(W / 2 + S(12)), (REAL)S(28), (REAL)(W / 2 - S(24)), (REAL)S(20)), 0, 1);
+        } else {
+            Gfx::Text(g, Utf8ToWide(m_remotePath), f, Theme::TextDim,
+                      RectF((REAL)(W / 2 + S(12)), (REAL)S(28), (REAL)(W / 2 - S(24)), (REAL)S(20)), 0, 1);
+        }
 
         // 底栏
         RectF br((REAL)m_bottomRect.left, (REAL)m_bottomRect.top,
@@ -771,6 +816,13 @@ void SftpWindow::HandleTask(SftpTask* t) {
     if (!t->ok) {
         std::wstring msg = t->message.empty() ? L"操作失败。" : t->message;
         SetStatus(msg, true);
+        if (t->kind == SftpTask::ListRemote) {
+            // 列目录失败时清空列表并把原因留在界面上，
+            // 不然就是"一片空白"，用户根本不知道发生了什么
+            m_remoteError = msg;
+            m_remoteItems.clear();
+            SendMessageW(m_lbRemote, LB_RESETCONTENT, 0, 0);
+        }
         UpdateButtons();
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return;
@@ -778,6 +830,7 @@ void SftpWindow::HandleTask(SftpTask* t) {
 
     switch (t->kind) {
     case SftpTask::ListRemote: {
+        m_remoteError.clear();
         m_remotePath = t->remotePath;
         m_remoteItems = t->remote;
         SendMessageW(m_lbRemote, LB_RESETCONTENT, 0, 0);
@@ -785,7 +838,11 @@ void SftpWindow::HandleTask(SftpTask* t) {
             SendMessageW(m_lbRemote, LB_ADDSTRING, 0, (LPARAM)e.name.c_str());
         }
         InvalidateRect(m_lbRemote, nullptr, TRUE);
-        SetStatus(L"远程目录已更新（" + std::to_wstring(m_remoteItems.size()) + L" 项）");
+        if (m_remoteItems.empty()) {
+            SetStatus(L"远程目录读到了，但一项都没有（服务器返回的 ls 输出无法识别？）", true);
+        } else {
+            SetStatus(L"远程目录已更新（" + std::to_wstring(m_remoteItems.size()) + L" 项）");
+        }
         break;
     }
 
