@@ -986,7 +986,12 @@ void SftpWindow::EnterLocal(int index) {
 void SftpWindow::EnterRemote(int index) {
     if (index < 0 || index >= (int)m_remoteItems.size()) return;
     const SftpEntry& e = m_remoteItems[(size_t)index];
-    if (!e.isDir) return;
+    // 符号链接也要能进。
+    // ls -l 只能告诉我们"这是个链接"，看不出目标是文件还是目录，所以不在这里
+    // 拦，直接交给 SftpListDir 去 cd：是目录就列出来，是文件会失败并报错。
+    // Android 的 Termux 里 storage/ 下面（以及很多别处）全是这种链接，
+    // 一律拦掉的话能操作的目录范围会小得可怜。
+    if (!e.isDir && !e.isLink) return;
     m_remotePath = e.path;
     RefreshRemote();
 }
