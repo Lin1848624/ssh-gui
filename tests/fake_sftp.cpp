@@ -78,6 +78,7 @@ static std::vector<Entry> ListingFor(const std::string& path) {
 //   FAKE_SFTP_NO_REALPATH=1 让 realpath 命令失败（老服务器没有这个 sftp 命令）
 static bool g_toyboxStyle = false;
 static bool g_noRealpath = false;
+static std::string g_cwd = "/home/test";   // cd 之后 pwd 要报的当前目录
 
 static void EmitListing(const std::string& path) {
     for (const auto& e : ListingFor(path)) {
@@ -163,24 +164,37 @@ int main(int argc, char** argv) {
         }
         if (line.empty()) continue;
 
-        // sftp 的 '-' 前缀表示"这条命令失败也不要中止整批"，
-        // 判断与中止都由客户端负责，这里照实模拟
-        bool ignoreError = false;
-        if (!line.empty() && line[0] == '-') {
-            ignoreError = true;
-            line = Trim(line.substr(1));
-        }
+        // sftp 的 '-' 前缀是**批处理模式**的"忽略错误"标记。客户端现在改走
+        // 交互模式、不再发带前缀的命令，这里保留解析只为兼容。
+        if (!line.empty() && line[0] == '-') line = Trim(line.substr(1));
 
         if (line.compare(0, 8, "realpath") == 0) {
             std::string p = Unquote(Trim(line.substr(8)));
             if (g_noRealpath) {
+                // 交互模式下单条命令失败不会中止会话（"失败即中止"是批处理模式
+                // 才有的行为），所以这里只报错，后面的 ls 照常执行
                 Out("realpath \"" + p + "\": No such file or directory\r\n");
-                if (!ignoreError) return 1;   // 没有 '-' 前缀就该整批中止
                 continue;
             }
             if (p.empty() || p == ".")      Out("/home/test\r\n");
             else if (p[0] == '/')           Out(p + "\r\n");
             else                            Out("/home/test/" + p + "\r\n");
+        } else if (line.compare(0, 2, "cd") == 0) {
+            // 客户端现在靠 cd + pwd 拿绝对路径。真 sftp 的 cd 成功时不输出。
+            std::string p = Unquote(Trim(line.substr(2)));
+            if (p.empty() || p == ".") {
+                // 保持原样
+            } else if (p[0] == '/') {
+                g_cwd = p;
+            } else if (p == "..") {
+                size_t slash = g_cwd.find_last_of('/');
+                g_cwd = (slash == std::string::npos || slash == 0) ? std::string("/")
+                                                                   : g_cwd.substr(0, slash);
+            } else {
+                g_cwd = (g_cwd == "/" ? std::string() : g_cwd) + "/" + p;
+            }
+        } else if (line.compare(0, 3, "pwd") == 0) {
+            Out("Remote working directory: " + g_cwd + "\r\n");
         } else if (line.compare(0, 2, "ls") == 0) {
             std::string rest = Trim(line.substr(2));
             // 可能带 -l 等选项
@@ -188,7 +202,7 @@ int main(int argc, char** argv) {
                 size_t sp = rest.find(' ');
                 rest = (sp == std::string::npos) ? std::string() : Trim(rest.substr(sp + 1));
             }
-            EmitListing(Unquote(rest));
+            EmitListing(Unquote(rest).empty() ? g_cwd : Unquote(rest));
         } else if (line.compare(0, 3, "put") == 0) {
             Out("Uploading data to remote\r\n");
         } else if (line.compare(0, 3, "get") == 0) {
@@ -204,6 +218,10 @@ int main(int argc, char** argv) {
             Out("Removed\r\n");
         } else if (line.compare(0, 5, "rmdir") == 0) {
             Out("Removed directory\r\n");
+        } else if (line.compare(0, 4, "quit") == 0 || line.compare(0, 3, "bye") == 0 ||
+                   line.compare(0, 4, "exit") == 0) {
+            // 交互模式下客户端会显式发 quit；真 sftp 到这里就退出了
+            return 0;
         } else {
             Out("Unknown command\r\n");
         }

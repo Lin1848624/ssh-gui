@@ -66,9 +66,17 @@ bool RunSftpBatch(const Session& s,
         return false;
     }
 
+    // 千万不要加 "-b -"（批处理模式）。
+    //
+    // sftp 的 -b 会在解析完命令行之后强制 options.batch_mode = 1，位置在
+    // "-o BatchMode=no" 之后，所以那个 -o 根本覆盖不了它。而 BatchMode=yes
+    // 的含义是"禁止一切密码询问" —— ssh 连 password 认证都不会尝试，直接
+    // 报 Permission denied (publickey,...)。这个坑很隐蔽：同样的密码和
+    // askpass 环境变量，用 ssh 能登录成功，用 sftp -b 必失败。
+    //
+    // 改成不带 -b：直接把命令写进 stdin（交互模式）。输出的 "sftp> " 提示符
+    // 和 "Connected to ..." 由 LooksLikeNoise 过滤掉。
     std::vector<std::wstring> args;
-    args.push_back(L"-b");
-    args.push_back(L"-");
     for (const auto& a : BuildSftpArgs(s)) args.push_back(a);
 
     std::wstring cmdline = QuoteArg(sftp);
@@ -134,10 +142,14 @@ bool RunSftpBatch(const Session& s,
         return false;
     }
 
-    // 写入命令后立刻关掉 stdin，让 sftp 知道没有更多命令
+    // 写入命令后立刻关掉 stdin，让 sftp 知道没有更多命令。
+    // 末尾补一个 quit：不带 -b 时 sftp 是交互模式，明确退出比依赖 EOF 更稳。
     if (!commands.empty()) {
+        std::string all = commands;
+        if (all.empty() || all.back() != '\n') all += '\n';
+        all += "quit\n";
         DWORD wrote = 0;
-        WriteFile(inWrite, commands.data(), (DWORD)commands.size(), &wrote, nullptr);
+        WriteFile(inWrite, all.data(), (DWORD)all.size(), &wrote, nullptr);
     }
     CloseHandle(inWrite);
 
@@ -285,11 +297,13 @@ bool SftpListDir(const Session& s, const std::string& path,
     std::string target = path.empty() ? std::string(".") : path;
 
     std::string cmds;
-    // 两条都加 '-' 前缀：批处理模式下命令失败会立刻中止整批，
-    // 而 realpath 是 OpenSSH 6.4+ 才有的 sftp 命令，Android/dropbear 一类
-    // 服务器上可能压根没有 —— 那样连后面的 ls 都执行不到，界面上就是一片空白。
-    cmds += "-realpath " + EscapeSftpPath(target) + "\n";
-    cmds += "-ls -l " + EscapeSftpPath(target) + "\n";
+    // 别用 realpath：它是**批处理模式**专有的命令，交互模式下会直接回
+    // "Invalid command."，路径就永远停在初始的 "."。
+    // 改用 cd + pwd 拿绝对路径；ls -l 不带参数即列当前目录，
+    // 返回的文件名不带 "./" 前缀，拼出来的 e.path 才干净。
+    cmds += "cd " + EscapeSftpPath(target) + "\n";
+    cmds += "pwd\n";
+    cmds += "ls -l\n";
 
     std::string output;
     if (!RunSftpBatch(s, cmds, output, err)) {
@@ -328,14 +342,26 @@ bool SftpListDir(const Session& s, const std::string& path,
 
         if (line.empty()) continue;
 
+        // 提示符行要先剔除。否则 "sftp> pwd" 的首字符 's' 会被下面的类型判断
+        // 当成 socket 文件行，gotAbs 提前置位，真正的 pwd 输出反而被跳过。
+        if (line.compare(0, 5, "sftp>") == 0) continue;
+
         if (!gotAbs) {
-            if (line[0] == '/') {
-                absPath = line;
-                gotAbs = true;
+            // pwd 的输出形如 "Remote working directory: /data/data/..."
+            static const std::string kPwdPrefix = "Remote working directory:";
+            if (line.compare(0, kPwdPrefix.size(), kPwdPrefix) == 0) {
+                std::string p = line.substr(kPwdPrefix.size());
+                while (!p.empty() && (p.front() == ' ' || p.front() == '\t')) p.erase(p.begin());
+                while (!p.empty() && (p.back() == ' ' || p.back() == '\r')) p.pop_back();
+                if (!p.empty() && p[0] == '/') {
+                    absPath = p;
+                    gotAbs = true;
+                }
                 continue;
             }
-            if (line[0] == '-' || line[0] == 'd' || line[0] == 'l') {
-                // realpath 没输出，直接进入列表
+            if (line[0] == '-' || line[0] == 'd' || line[0] == 'l' || line[0] == 'c' ||
+                line[0] == 'b' || line[0] == 'p' || line[0] == 's') {
+                // 没拿到 pwd 就先按原样进列表
                 gotAbs = true;
             } else {
                 continue;

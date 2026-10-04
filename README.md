@@ -239,6 +239,26 @@ tty，不靠 askpass 就没人喂密码）。
 排查这类"看起来是链路问题"的故障时，**先确认喂进去的数据本身对不对**——这次前两轮
 都花在怀疑 askpass 链路上，而链路一直是好的。
 
+### 15. `sftp -b` 会强制 `BatchMode=yes`，密码认证根本不会尝试
+
+不要用 `sftp -b -` 喂命令。`-b` 在解析完命令行之后强制 `options.batch_mode = 1`，
+位置在 `-o BatchMode=no` **之后**，所以那个 `-o` 覆盖不了它。而 `BatchMode=yes`
+的含义是"禁止一切密码询问" —— ssh 连 password 认证都不会尝试，直接报
+`Permission denied (publickey,password,keyboard-interactive)`。
+
+这个坑极隐蔽：**askpass 日志会显示密码被正常喂出去了**，很容易让人一直往链路上查。
+同样的密码、同样的 askpass 环境变量，`ssh` 能登录成功而 `sftp -b` 必失败 ——
+用 `-v` 对比两者的认证过程才看得出来（一个走 `read_passphrase: requested to
+askpass`，另一个只试完 publickey 就放弃）。
+
+现在不带 `-b`，命令直接写进 stdin（交互模式），末尾补 `quit`。随之而来两个细节：
+
+- `realpath` 是**批处理模式专有**命令，交互模式下回 `Invalid command.`，
+  远程路径会一直停在初始的 `.`。改用 `cd` + `pwd` 拿绝对路径，
+  `ls -l` 不带参数即列当前目录（返回的文件名也不带 `./` 前缀）
+- `sftp> pwd` 提示符行的首字符是 `s`，会被 `ls` 解析器当成 socket 类型行，
+  使 `gotAbs` 提前置位、真正的 `pwd` 输出反被跳过 —— 解析前先剔除提示符行
+
 ---
 
 ## 配置文件
