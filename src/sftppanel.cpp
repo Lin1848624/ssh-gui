@@ -74,14 +74,11 @@ bool RunSftpBatch(const Session& s,
     std::wstring cmdline = QuoteArg(sftp);
     for (const auto& a : args) cmdline += L" " + QuoteArg(a);
 
-    std::vector<std::pair<std::wstring, std::wstring>> envExtra;
-    if (!s.password.empty()) {
-        envExtra.emplace_back(L"SSH_ASKPASS", ExePath());
-        envExtra.emplace_back(L"SSH_ASKPASS_REQUIRE", L"force");
-        envExtra.emplace_back(L"SSH_GUI_PASSWORD", s.password);
-        envExtra.emplace_back(L"DISPLAY", L":0");
-    }
-    std::vector<wchar_t> envBlock = BuildEnvironmentBlock(envExtra);
+    // 自动填密码的环境变量统一由 BuildAskPassEnv 生成。
+    // SFTP 是另起进程、批处理模式又没有 tty，不靠 askpass 就必然
+    // "Permission denied" —— 这里曾经漏了 SSH_GUI_ASKPASS 且用了反斜杠路径。
+    // host key 不代答：能走到这里说明终端那边已经确认过了。
+    std::vector<wchar_t> envBlock = BuildEnvironmentBlock(BuildAskPassEnv(s, false));
 
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
@@ -296,7 +293,15 @@ bool SftpListDir(const Session& s, const std::string& path,
 
     std::string output;
     if (!RunSftpBatch(s, cmds, output, err)) {
-        if (err && err->empty()) {
+        // 认证失败是最常见的一种，而且用户看到 "Permission denied" 通常不知道该做什么：
+        // SFTP 是另起的进程，终端里手输的密码不会共享给它，只能在会话里存密码。
+        if (output.find("Permission denied") != std::string::npos ||
+            output.find("Authentication failed") != std::string::npos) {
+            if (err) {
+                *err = L"认证失败。文件传输是另起一个连接，终端里手输的密码不会共享给它 —— "
+                       L"请「编辑」此会话，勾选「保存密码」并填入密码后重试。";
+            }
+        } else if (err && err->empty()) {
             std::wstring e = FirstErrorLine(output);
             *err = e.empty() ? L"sftp 执行失败。" : e;
         }

@@ -372,12 +372,7 @@ bool TerminalView::Connect(const Session& s, std::wstring* err) {
         LogLine(L"主机密钥未知且未启用自动信任，本次不启用 askpass，改由终端手动确认");
     }
     if (wantAskPass) {
-        env.emplace_back(L"SSH_ASKPASS", AskPassPath());
-        env.emplace_back(L"SSH_ASKPASS_REQUIRE", L"force");
-        env.emplace_back(L"SSH_GUI_ASKPASS", L"1");       // ssh 只传提示串，靠它认出自调用
-        env.emplace_back(L"SSH_GUI_PASSWORD", s.password);
-        env.emplace_back(L"SSH_GUI_AUTO_ACCEPT", s.autoAcceptHostKey ? L"1" : L"0");
-        env.emplace_back(L"DISPLAY", L":0");
+        env = BuildAskPassEnv(s, s.autoAcceptHostKey);
     }
 
     m_pty.SetOnOutput([this](const char* d, size_t n) { OnPtyOutput(d, n); });

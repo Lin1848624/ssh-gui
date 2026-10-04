@@ -96,6 +96,28 @@ static void EmitListing(const std::string& path) {
     }
 }
 
+// 把收到的 askpass 相关环境变量落到文件，供测试脚本核对。
+// 走文件而不是 stdout：stdout 会被 SFTP 的 ls 解析器读到，混进去就成噪声了。
+static void WriteAskPassProbe() {
+    char probePath[1024] = {};
+    if (GetEnvironmentVariableA("FAKE_SFTP_PROBE", probePath, sizeof(probePath)) == 0) return;
+
+    char ap[1024] = {}, flag[64] = {}, pw[256] = {}, require[64] = {};
+    GetEnvironmentVariableA("SSH_ASKPASS", ap, sizeof(ap));
+    GetEnvironmentVariableA("SSH_GUI_ASKPASS", flag, sizeof(flag));
+    GetEnvironmentVariableA("SSH_GUI_PASSWORD", pw, sizeof(pw));
+    GetEnvironmentVariableA("SSH_ASKPASS_REQUIRE", require, sizeof(require));
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, probePath, "w") != 0 || !f) return;
+    fprintf(f, "SSH_ASKPASS=%s\n", ap);
+    fprintf(f, "askpass_has_backslash=%d\n", strchr(ap, '\\') ? 1 : 0);
+    fprintf(f, "SSH_GUI_ASKPASS=%s\n", flag);
+    fprintf(f, "SSH_ASKPASS_REQUIRE=%s\n", require);
+    fprintf(f, "has_password=%d\n", pw[0] ? 1 : 0);
+    fclose(f);
+}
+
 int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
@@ -114,6 +136,7 @@ int main(int argc, char** argv) {
             g_noRealpath = true;
         }
     }
+    WriteAskPassProbe();
 
     (void)argc;
     (void)argv;

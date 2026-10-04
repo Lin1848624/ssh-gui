@@ -336,6 +336,20 @@ bool IsHostKeyKnown(const std::wstring& host, int port) {
     return known;
 }
 
+std::vector<std::pair<std::wstring, std::wstring>> BuildAskPassEnv(const Session& s,
+                                                                  bool autoAcceptHostKey) {
+    std::vector<std::pair<std::wstring, std::wstring>> env;
+    if (s.password.empty()) return env;   // 没存密码就别开 askpass
+
+    env.emplace_back(L"SSH_ASKPASS", AskPassPath());          // 正斜杠，见 AskPassPath 注释
+    env.emplace_back(L"SSH_ASKPASS_REQUIRE", L"force");       // 有 tty 也要走 askpass
+    env.emplace_back(L"SSH_GUI_ASKPASS", L"1");               // ssh 只传提示串，靠这个认自己
+    env.emplace_back(L"SSH_GUI_PASSWORD", s.password);
+    env.emplace_back(L"SSH_GUI_AUTO_ACCEPT", autoAcceptHostKey ? L"1" : L"0");
+    env.emplace_back(L"DISPLAY", L":0");                      // 部分版本用它判断能否走 askpass
+    return env;
+}
+
 // ---------------------------------------------------------------------------
 //  命令行
 // ---------------------------------------------------------------------------

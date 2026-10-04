@@ -85,6 +85,17 @@ std::wstring AskPassPath();
 // 能正确处理 HashKnownHosts 与非标准端口的 [host]:port 写法。
 bool IsHostKeyKnown(const std::wstring& host, int port);
 
+// 组装"让 ssh/sftp 自动填密码"所需的环境变量。
+//
+// 终端会话和 SFTP 批处理都必须走这一个函数 —— 之前两处各写了一份，
+// 修好终端那份却漏了 SFTP，结果 SFTP 一直认证失败（Permission denied）。
+// 里面有三样缺一不可：
+//   SSH_ASKPASS        必须是**正斜杠**路径（OpenSSH 用 posix_spawnp 启动它）
+//   SSH_GUI_ASKPASS    我们自己用来认出"被当作 askpass 调用了"的标记
+//   SSH_ASKPASS_REQUIRE=force   即使有 tty 也走 askpass
+std::vector<std::pair<std::wstring, std::wstring>> BuildAskPassEnv(const Session& s,
+                                                                  bool autoAcceptHostKey);
+
 // ---------------------------------------------------------------------------
 //  命令行构造
 // ---------------------------------------------------------------------------
