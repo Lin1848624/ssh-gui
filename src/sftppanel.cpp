@@ -602,6 +602,11 @@ private:
     std::vector<int> SelRemoteItems() const;
     // 选中项变化时在状态栏报一句"选中 N 项"，多选时用户才知道自己选了几个
     void ReportSelection();
+    // Ctrl+A 全选。ListBox 没有内建这个快捷键，得靠子类化拦键盘消息。
+    void SelectAllIn(HWND lb);
+    // 列表的子类化过程。声明成静态成员是为了能访问上面的私有方法。
+    static LRESULT CALLBACK ListSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                         UINT_PTR idSubclass, DWORD_PTR refData);
 
     HWND     m_hwnd = nullptr;
     HWND     m_parent = nullptr;
@@ -1302,6 +1307,31 @@ void SftpWindow::ReportSelection() {
     SetStatus(s);
 }
 
+void SftpWindow::SelectAllIn(HWND lb) {
+    int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
+    if (n <= 0) return;
+    // LB_SELITEMRANGE 的 lParam 是 MAKELPARAM(first, last)，
+    // last 传 -1 表示"一直到末尾"，于是这一条就把全部选中了。
+    SendMessageW(lb, LB_SELITEMRANGE, TRUE, MAKELPARAM(0, (short)-1));
+    ReportSelection();
+}
+
+LRESULT CALLBACK SftpWindow::ListSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR idSubclass, DWORD_PTR refData) {
+    (void)idSubclass;   // 两个列表共用同一个过程，用不上这个 id
+    // ListBox 自己不认 Ctrl+A，这里补上。焦点本来就在列表上，
+    // 全选完继续按方向键、直接点上传，都顺。
+    //
+    // 用 GetAsyncKeyState 而不是 GetKeyState：后者读的是"本线程消息队列里
+    // 最近处理过的"按键状态，只有在 Ctrl 的按键消息确实进过这个队列时才准；
+    // 异步键状态与消息路由无关，更可靠。
+    if (msg == WM_KEYDOWN && wp == 'A' && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+        if (refData) reinterpret_cast<SftpWindow*>(refData)->SelectAllIn(hwnd);
+        return 0;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 void SftpWindow::EnterLocal(int index) {
     if (index < 0 || index >= (int)m_localItems.size()) return;
     const LocalEntry& e = m_localItems[(size_t)index];
@@ -1657,6 +1687,10 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
 
         m_lbLocal  = mkList(IDC_SFTP_LOCAL_LIST);
         m_lbRemote = mkList(IDC_SFTP_REMOTE_LIST);
+
+        // 子类化两个列表，补上 ListBox 没有的 Ctrl+A
+        if (m_lbLocal)  SetWindowSubclass(m_lbLocal,  &SftpWindow::ListSubclass, 1, (DWORD_PTR)this);
+        if (m_lbRemote) SetWindowSubclass(m_lbRemote, &SftpWindow::ListSubclass, 2, (DWORD_PTR)this);
 
         auto mkBtn = [&](int id, const wchar_t* text) {
             HWND h = CreateWindowExW(
