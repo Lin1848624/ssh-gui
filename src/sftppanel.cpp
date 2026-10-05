@@ -28,6 +28,7 @@ enum : int {
     IDC_SFTP_MKDIR,
     IDC_SFTP_DELETE,
     IDC_SFTP_REFRESH,
+    IDC_SFTP_REFRESH_LOCAL,
     IDC_SFTP_CLOSE,
     IDC_SFTP_OPEN_LOCAL,
 };
@@ -329,6 +330,16 @@ bool LooksLikeCommandFailure(const std::string& output) {
     return false;
 }
 
+// 取父目录。根目录的父目录仍是根 —— 免得拼出 "//" 或空串。
+std::string ParentPath(const std::string& p) {
+    if (p.empty() || p == "/") return "/";
+    std::string s = p;
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+    size_t slash = s.find_last_of('/');
+    if (slash == std::string::npos || slash == 0) return "/";
+    return s.substr(0, slash);
+}
+
 } // namespace
 
 bool SftpListDir(const Session& s, const std::string& path,
@@ -422,13 +433,25 @@ bool SftpListDir(const Session& s, const std::string& path,
     if (!gotAbs && absPath.empty()) absPath = target;
     if (absPath.empty()) absPath = target;
 
-    // 目录优先，然后按名字排
+    // sftp 的 ls 不返回 . 和 ..（列的就是目录内容），所以自己补一个 ".."，
+    // 否则进了深层目录就只能靠关掉窗口重开才能回上级。
+    // 不在根目录时才加；path 直接算成父目录，省得拼出 "/a/b/.." 这种。
+    if (!absPath.empty() && absPath != "/") {
+        SftpEntry up;
+        up.name  = L"..";
+        up.isDir = true;
+        up.path  = ParentPath(absPath);
+        out.push_back(up);
+    }
+
+    // 目录优先，然后按名字排。'..' 是目录且名字以 '.' 开头，自然落在最前。
     std::sort(out.begin(), out.end(), [](const SftpEntry& a, const SftpEntry& b) {
         if (a.isDir != b.isDir) return a.isDir > b.isDir;
         return a.name < b.name;
     });
 
     for (auto& e : out) {
+        if (e.name == L"..") continue;   // 上面已经算好父目录路径
         std::string base = absPath;
         if (!base.empty() && base.back() != '/') base += '/';
         e.path = base + WideToUtf8(e.name);
@@ -559,6 +582,7 @@ private:
     HWND m_btnUp = nullptr, m_btnDown = nullptr, m_btnMkdir = nullptr;
     HWND m_btnDelete = nullptr, m_btnRefresh = nullptr, m_btnClose = nullptr;
     HWND m_btnOpenLocal = nullptr;
+    HWND m_btnRefreshLocal = nullptr;
 
     std::wstring m_localPath;
     std::string  m_remotePath = ".";
@@ -706,6 +730,8 @@ void SftpWindow::Layout() {
     int bx = pad;
     MoveWindow(m_btnOpenLocal, bx, by, S(110), S(28), TRUE);
     bx += S(118);
+    MoveWindow(m_btnRefreshLocal, bx, by, bw, S(28), TRUE);
+    bx += bw + S(8);
     MoveWindow(m_btnMkdir, bx, by, bw, S(28), TRUE);
     bx += bw + S(8);
     MoveWindow(m_btnDelete, bx, by, bw, S(28), TRUE);
@@ -1174,6 +1200,13 @@ void SftpWindow::DoDeleteRemote() {
     }
     const SftpEntry& e = m_remoteItems[(size_t)sel];
 
+    // ".." 是我们自己塞进去做导航的，磁盘上并不存在这个条目 ——
+    // 放它过去会把 rmdir 打在父目录上。
+    if (e.name == L"..") {
+        SetStatus(L"「..」是用来返回上级的，不是真实条目，不能删除。", true);
+        return;
+    }
+
     std::wstring msg = L"确定要删除远程" + std::wstring(e.isDir ? L"目录" : L"文件") +
                        L"「" + e.name + L"」吗？\n\n" + Utf8ToWide(e.path) + L"\n\n此操作不可撤销。";
     if (MessageBoxW(m_hwnd, msg.c_str(), L"删除远程项目",
@@ -1257,9 +1290,10 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
         m_btnDown      = mkBtn(IDC_SFTP_DOWN, L"<<<  下载");
         m_btnMkdir     = mkBtn(IDC_SFTP_MKDIR, L"新建目录");
         m_btnDelete    = mkBtn(IDC_SFTP_DELETE, L"删除远程");
-        m_btnRefresh   = mkBtn(IDC_SFTP_REFRESH, L"刷新");
+        m_btnRefresh   = mkBtn(IDC_SFTP_REFRESH, L"刷新远程");
         m_btnClose     = mkBtn(IDC_SFTP_CLOSE, L"关闭");
         m_btnOpenLocal = mkBtn(IDC_SFTP_OPEN_LOCAL, L"选择本地目录...");
+        m_btnRefreshLocal = mkBtn(IDC_SFTP_REFRESH_LOCAL, L"刷新本地");
 
         Layout();
         RefreshLocal();
@@ -1334,7 +1368,8 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_SFTP_DOWN:      DoDownload();     return 0;
         case IDC_SFTP_MKDIR:     DoMkdir();        return 0;
         case IDC_SFTP_DELETE:    DoDeleteRemote(); return 0;
-        case IDC_SFTP_REFRESH:   RefreshLocal(); RefreshRemote(); return 0;
+        case IDC_SFTP_REFRESH:       RefreshRemote(); return 0;
+        case IDC_SFTP_REFRESH_LOCAL: RefreshLocal();  return 0;
         case IDC_SFTP_OPEN_LOCAL: ChooseLocalDir(); return 0;
         case IDC_SFTP_CLOSE:     DestroyWindow(m_hwnd); return 0;
         default: break;
