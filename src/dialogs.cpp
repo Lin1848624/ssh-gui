@@ -141,77 +141,113 @@ struct SessionDlg {
 
 constexpr const wchar_t* kSessionClass = L"SshGuiSessionDlg";
 
+// ---------------------------------------------------------------------------
+//  会话编辑对话框的坐标表
+//
+//  布局（摆控件）和绘制（画标签）**必须用同一份坐标**。以前两边各写一遍
+//  y 的累加，加一行就得改两处，漏一处就会出现标签压住控件 —— 加第二个勾选框
+//  时正是这么踩的。现在统一算一次，两边都从这里取。
+// ---------------------------------------------------------------------------
+struct SessionDlgMetrics {
+    int labelW = 0, xLbl = 0, xCtl = 0, wCtl = 0, rowH = 0;
+    int yName = 0, yHost = 0, yUser = 0, yKey = 0, yDir = 0, yPass = 0;
+    int yAutoAccept = 0, yAutoConnect = 0;
+    int yFwdTitle = 0, yFwdHint = 0, yFwdList = 0;
+    int yExtra = 0, yExtraRow = 0;
+    int ySep = 0, btnY = 0, btnW = 0;
+};
+
+SessionDlgMetrics SessionDlgMetricsCompute(int W, int H) {
+    SessionDlgMetrics m;
+    m.labelW = S(76);
+    m.xLbl   = S(16);
+    m.xCtl   = S(16) + m.labelW;
+    m.wCtl   = W - m.xCtl - S(16);
+    m.rowH   = S(24);
+
+    int y = S(14);
+    m.yName = y;  y += S(38);
+    m.yHost = y;  y += S(38);
+    m.yUser = y;  y += S(38);
+    m.yKey  = y;  y += S(38);
+    m.yDir  = y;  y += S(38);
+    m.yPass = y;  y += S(38);
+
+    // 密码行下面两个勾选框
+    y += S(32);
+    m.yAutoAccept = y;
+    y += S(28);
+    m.yAutoConnect = y;
+
+    // 端口转发：标题 + 说明占两行，列表框在它们下面
+    y += S(36);
+    m.yFwdTitle = y;
+    m.yFwdHint  = y + S(18);
+    m.yFwdList  = y + S(36);
+
+    y = m.yFwdList + S(92) + S(12);   // 列表框高 92
+    m.yExtra = y;
+    y += S(40);
+    m.yExtraRow = y;
+
+    m.ySep = H - S(58);
+    m.btnY = H - S(46);
+    m.btnW = S(88);
+    return m;
+}
+
 void SessionDlgLayout(SessionDlg* d) {
     RECT rc = {};
     GetClientRect(d->hwnd, &rc);
-    int W = rc.right;
-
-    int labelW = S(76);
-    int x = S(16) + labelW;
-    int w = W - x - S(16);
-    int h = S(24);
-    int y = S(14);
+    int W = rc.right, H = rc.bottom;
+    const SessionDlgMetrics m = SessionDlgMetricsCompute(W, H);
 
     auto place = [&](HWND hc, int xx, int yy, int ww, int hh) {
         if (hc) MoveWindow(hc, xx, yy, ww, hh, TRUE);
     };
 
-    // 名称
-    place(GetDlgItem(d->hwnd, 0), 0, 0, 0, 0);
-    int y0 = y;
-    place(d->edName, x, y0, w, h);
+    const int x = m.xCtl, w = m.wCtl, h = m.rowH;
 
-    y += S(38);
+    place(d->edName, x, m.yName, w, h);
+
     int portW = S(70);
-    place(d->edHost, x, y, w - portW - S(52), h);
-    place(d->edPort, x + w - portW, y, portW, h);
+    place(d->edHost, x, m.yHost, w - portW - S(52), h);
+    place(d->edPort, x + w - portW, m.yHost, portW, h);
 
-    y += S(38);
-    place(d->edUser, x, y, w, h);
+    place(d->edUser, x, m.yUser, w, h);
 
-    y += S(38);
     int browseW = S(64);
-    place(d->edKey, x, y, w - browseW - S(6), h);
-    place(GetDlgItem(d->hwnd, IDC_BTN_BROWSE_KEY), x + w - browseW, y, browseW, h);
+    place(d->edKey, x, m.yKey, w - browseW - S(6), h);
+    place(GetDlgItem(d->hwnd, IDC_BTN_BROWSE_KEY), x + w - browseW, m.yKey, browseW, h);
 
-    y += S(38);
-    place(d->edDir, x, y, w, h);
+    place(d->edDir, x, m.yDir, w, h);
 
-    y += S(38);
     int saveW = S(96);
     int showW = S(96);
-    place(d->edPass, x, y, w - saveW - showW - S(12), h);
-    place(d->chkShowPass, x + w - saveW - showW - S(6), y, showW, h);
-    place(d->chkSave, x + w - saveW, y, saveW, h);
+    place(d->edPass, x, m.yPass, w - saveW - showW - S(12), h);
+    place(d->chkShowPass, x + w - saveW - showW - S(6), m.yPass, showW, h);
+    place(d->chkSave, x + w - saveW, m.yPass, saveW, h);
 
-    y += S(32);
-    place(d->chkAutoAccept, x, y, w, h);
-
-    y += S(28);
-    place(d->chkAutoConnect, x, y, w, h);
+    place(d->chkAutoAccept, x, m.yAutoAccept, w, h);
+    place(d->chkAutoConnect, x, m.yAutoConnect, w, h);
 
     // 端口转发
-    y += S(40);
     int btnW = S(64);
-    place(d->lbFwd, x, y, w - btnW - S(8), S(92));
-    place(GetDlgItem(d->hwnd, IDC_BTN_FWD_ADD), x + w - btnW, y, btnW, h);
-    place(GetDlgItem(d->hwnd, IDC_BTN_FWD_DEL), x + w - btnW, y + h + S(6), btnW, h);
+    place(d->lbFwd, x, m.yFwdList, w - btnW - S(8), S(92));
+    place(GetDlgItem(d->hwnd, IDC_BTN_FWD_ADD), x + w - btnW, m.yFwdList, btnW, h);
+    place(GetDlgItem(d->hwnd, IDC_BTN_FWD_DEL), x + w - btnW, m.yFwdList + h + S(6), btnW, h);
 
-    y += S(104);
-    place(d->edExtra, x, y, w, h);
+    place(d->edExtra, x, m.yExtra, w, h);
 
     // 三个勾选
-    y += S(40);
     int cw = S(104);
-    place(d->chkComp, x, y, cw, h);
-    place(d->chkAlive, x + cw + S(6), y, cw, h);
-    place(d->chkVerbose, x + cw * 2 + S(12), y, cw, h);
+    place(d->chkComp, x, m.yExtraRow, cw, h);
+    place(d->chkAlive, x + cw + S(6), m.yExtraRow, cw, h);
+    place(d->chkVerbose, x + cw * 2 + S(12), m.yExtraRow, cw, h);
 
     // 底部按钮
-    int by = rc.bottom - S(46);
-    int bw = S(88);
-    place(GetDlgItem(d->hwnd, IDC_BTN_CANCEL), W - S(16) - bw, by, bw, S(30));
-    place(GetDlgItem(d->hwnd, IDC_BTN_OK), W - S(16) - bw * 2 - S(8), by, bw, S(30));
+    place(GetDlgItem(d->hwnd, IDC_BTN_CANCEL), W - S(16) - m.btnW, m.btnY, m.btnW, S(30));
+    place(GetDlgItem(d->hwnd, IDC_BTN_OK), W - S(16) - m.btnW * 2 - S(8), m.btnY, m.btnW, S(30));
 }
 
 void SessionDlgRefreshForwards(SessionDlg* d) {
@@ -246,43 +282,32 @@ void SessionDlgPaint(SessionDlg* d, HDC hdcTarget) {
         Font* f = Gfx::UiFont(S(12), false);
         Font* fb = Gfx::UiFont(S(12), true);
 
-        int labelW = S(76);
-        int x = S(16);
-        int y = S(14);
-        int h = S(24);
+        // 坐标全部取自同一份表 —— 和 SessionDlgLayout 用的是同一个函数，
+        // 不可能再出现"控件在 A、标签在 B"的错位
+        const SessionDlgMetrics m = SessionDlgMetricsCompute(W, H);
 
         auto label = [&](const wchar_t* text, int yy, Font* ff) {
             Gfx::Text(g, text, ff ? ff : f, Theme::TextDim,
-                      RectF((REAL)x, (REAL)yy, (REAL)labelW, (REAL)h), 0, 1);
+                      RectF((REAL)m.xLbl, (REAL)yy, (REAL)m.labelW, (REAL)m.rowH), 0, 1);
         };
 
-        label(L"会话名称", y, nullptr);
-        y += S(38);
-        label(L"主机地址", y, nullptr);
-        y += S(38);
-        label(L"用户名", y, nullptr);
-        y += S(38);
-        label(L"私钥文件", y, nullptr);
-        y += S(38);
-        label(L"启动目录", y, nullptr);
-        y += S(38);
-        label(L"密码", y, nullptr);
-        y += S(38);
+        label(L"会话名称", m.yName, nullptr);
+        label(L"主机地址", m.yHost, nullptr);
+        label(L"用户名",   m.yUser, nullptr);
+        label(L"私钥文件", m.yKey,  nullptr);
+        label(L"启动目录", m.yDir,  nullptr);
+        label(L"密码",     m.yPass, nullptr);
 
-        // 让出下面两行勾选框（"首次连接自动信任主机密钥" + "启动程序后自动连接"）。
-        // 这里和 SessionDlgLayout 是各写一遍坐标的，加/删勾选框时两边都要动。
-        y += S(60);
-
-        label(L"端口转发", y + S(6), fb);
-        y += S(18);
+        // 端口转发：标题与说明都来自坐标表，和列表框的位置同源
+        label(L"端口转发", m.yFwdTitle, fb);
         Gfx::Text(g, L"本地 -L / 远程 -R / 动态 -D（SOCKS5）", f, Theme::TextFaint,
-                  RectF((REAL)(x + labelW), (REAL)y, (REAL)(W - x - labelW - S(80)), (REAL)S(18)), 0, 1);
+                  RectF((REAL)m.xCtl, (REAL)m.yFwdHint,
+                        (REAL)(W - m.xCtl - S(80)), (REAL)S(18)), 0, 1);
 
-        y += S(28 + 92);
-        label(L"额外参数", y, nullptr);
+        label(L"额外参数", m.yExtra, nullptr);
 
         // 分隔线
-        Gfx::Line(g, (REAL)S(16), (REAL)(H - S(58)), (REAL)(W - S(16)), (REAL)(H - S(58)),
+        Gfx::Line(g, (REAL)S(16), (REAL)m.ySep, (REAL)(W - S(16)), (REAL)m.ySep,
                   Theme::Border);
 
         g.Flush(FlushIntentionSync);
