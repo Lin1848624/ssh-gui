@@ -510,6 +510,9 @@ struct SftpTask {
     std::string remotePath;
     std::wstring localPath;
     bool refreshBoth = false;
+    // 传输完成后的自动刷新用：不要把状态栏改成"正在读取/已更新"，
+    // 否则用户刚看到的"上传完成：N 个文件"会立刻被冲掉。
+    bool quiet = false;
 };
 
 std::vector<class SftpWindow*> g_windows;
@@ -580,7 +583,7 @@ private:
 
     void RefreshLocal();
     void RefreshRemote();
-    void RefreshRemoteTo(const std::string& target);
+    void RefreshRemoteTo(const std::string& target, bool quiet = false);
     void HandleTask(SftpTask* t);
 
     void EnterLocal(int index);
@@ -593,6 +596,12 @@ private:
 
     int  SelLocal() const;
     int  SelRemote() const;
+    // 多选：返回所有选中项（升序）。Ctrl / Shift 点击由 ListBox 的
+    // LBS_EXTENDEDSEL 样式处理，这里只负责把选中集合取出来。
+    std::vector<int> SelLocalItems() const;
+    std::vector<int> SelRemoteItems() const;
+    // 选中项变化时在状态栏报一句"选中 N 项"，多选时用户才知道自己选了几个
+    void ReportSelection();
 
     HWND     m_hwnd = nullptr;
     HWND     m_parent = nullptr;
@@ -1136,19 +1145,20 @@ void SftpWindow::RefreshRemote() {
 // 列指定目录。**成功之前不动 m_remotePath** —— 否则进了列不出来的目录
 // （Android 的 /storage/emulated 就是：能 cd 进去但无权 readdir）之后，
 // 路径已经改了、列表又是空的，用户会卡在一个空窗口里连 ".." 都没有。
-void SftpWindow::RefreshRemoteTo(const std::string& target) {
+void SftpWindow::RefreshRemoteTo(const std::string& target, bool quiet) {
     if (m_busy.exchange(true)) return;
     UpdateButtons();
-    SetStatus(L"正在读取远程目录 " + Utf8ToWide(target) + L" ...");
+    if (!quiet) SetStatus(L"正在读取远程目录 " + Utf8ToWide(target) + L" ...");
 
     Session sess = m_session;
     std::string path = target;
     HWND hwnd = m_hwnd;
     auto alive = m_alive;
 
-    std::thread([hwnd, alive, sess, path]() {
+    std::thread([hwnd, alive, sess, path, quiet]() {
         auto* t = new SftpTask();
         t->kind = SftpTask::ListRemote;
+        t->quiet = quiet;
         std::wstring err;
         std::string abs;
         t->ok = SftpListDir(sess, path, t->remote, abs, &err);
@@ -1214,22 +1224,25 @@ void SftpWindow::HandleTask(SftpTask* t) {
             SendMessageW(m_lbRemote, LB_ADDSTRING, 0, (LPARAM)e.name.c_str());
         }
         InvalidateRect(m_lbRemote, nullptr, TRUE);
-        if (m_remoteItems.empty()) {
-            SetStatus(L"远程目录读到了，但一项都没有（服务器返回的 ls 输出无法识别？）", true);
-        } else {
-            SetStatus(L"远程目录已更新（" + std::to_wstring(m_remoteItems.size()) + L" 项）");
+        // quiet 是"传输完成后的自动刷新"，状态栏要留给那句完成提示
+        if (!t->quiet) {
+            if (m_remoteItems.empty()) {
+                SetStatus(L"远程目录读到了，但一项都没有（服务器返回的 ls 输出无法识别？）", true);
+            } else {
+                SetStatus(L"远程目录已更新（" + std::to_wstring(m_remoteItems.size()) + L" 项）");
+            }
         }
         break;
     }
 
     case SftpTask::Transfer:
         SetStatus(t->message.empty() ? L"传输完成。" : t->message);
-        RefreshRemote();
+        RefreshRemoteTo(m_remotePath, true);   // 静默刷新，别盖掉上面那句
         break;
 
     case SftpTask::Simple:
         SetStatus(t->message.empty() ? L"完成。" : t->message);
-        RefreshRemote();
+        RefreshRemoteTo(m_remotePath, true);
         break;
 
     default:
@@ -1244,11 +1257,49 @@ void SftpWindow::HandleTask(SftpTask* t) {
 //  操作
 // ---------------------------------------------------------------------------
 int SftpWindow::SelLocal() const {
+    // 多选模式下 LB_GETCURSEL 给的是"焦点项"（也就是锚点），
+    // 双击进目录、上下键移动都靠它，正合适。
     return (int)SendMessageW(m_lbLocal, LB_GETCURSEL, 0, 0);
 }
 
 int SftpWindow::SelRemote() const {
     return (int)SendMessageW(m_lbRemote, LB_GETCURSEL, 0, 0);
+}
+
+std::vector<int> SftpWindow::SelLocalItems() const {
+    std::vector<int> v;
+    int n = (int)SendMessageW(m_lbLocal, LB_GETSELCOUNT, 0, 0);
+    if (n <= 0) return v;
+    v.resize((size_t)n);
+    int got = (int)SendMessageW(m_lbLocal, LB_GETSELITEMS, (WPARAM)n, (LPARAM)v.data());
+    if (got < n) v.resize((size_t)(got < 0 ? 0 : got));
+    return v;
+}
+
+std::vector<int> SftpWindow::SelRemoteItems() const {
+    std::vector<int> v;
+    int n = (int)SendMessageW(m_lbRemote, LB_GETSELCOUNT, 0, 0);
+    if (n <= 0) return v;
+    v.resize((size_t)n);
+    int got = (int)SendMessageW(m_lbRemote, LB_GETSELITEMS, (WPARAM)n, (LPARAM)v.data());
+    if (got < n) v.resize((size_t)(got < 0 ? 0 : got));
+    return v;
+}
+
+void SftpWindow::ReportSelection() {
+    // 两边都报一下，用户一眼能看出各选了几个 —— 多选最容易犯的错
+    // 就是以为选上了其实没选上。
+    size_t nl = SelLocalItems().size();
+    size_t nr = SelRemoteItems().size();
+    if (nl <= 1 && nr <= 1) return;   // 单选/没选不用打扰
+
+    std::wstring s;
+    if (nl > 1) s += L"本地选中 " + std::to_wstring(nl) + L" 项";
+    if (nr > 1) {
+        if (!s.empty()) s += L"；";
+        s += L"远程选中 " + std::to_wstring(nr) + L" 项";
+    }
+    SetStatus(s);
 }
 
 void SftpWindow::EnterLocal(int index) {
@@ -1311,45 +1362,64 @@ void SftpWindow::ChooseLocalDir() {
 }
 
 void SftpWindow::DoUpload() {
-    int sel = SelLocal();
-    if (sel < 0 || sel >= (int)m_localItems.size()) {
-        SetStatus(L"请先在左侧选中要上传的文件。", true);
+    std::vector<int> sel = SelLocalItems();
+    if (sel.empty()) {
+        SetStatus(L"请先在左侧选中要上传的文件（按住 Ctrl / Shift 可以多选）。", true);
         return;
     }
-    const LocalEntry& e = m_localItems[(size_t)sel];
-    if (e.isDir) {
-        SetStatus(L"暂不支持上传整个目录，请进入目录后逐个上传文件。", true);
+
+    // 收集待上传的文件；目录（含 ".."）跳过，最后统一报一句跳过了几个
+    std::vector<std::wstring> names;
+    int skippedDirs = 0;
+    for (int idx : sel) {
+        if (idx < 0 || idx >= (int)m_localItems.size()) continue;
+        const LocalEntry& e = m_localItems[(size_t)idx];
+        if (e.isDir) { ++skippedDirs; continue; }
+        names.push_back(e.name);
+    }
+    if (names.empty()) {
+        SetStatus(L"选中的都是目录。暂不支持上传整个目录，请进入目录后选文件。", true);
         return;
     }
     if (m_busy.exchange(true)) return;
     UpdateButtons();
 
-    std::wstring localFile = m_localPath;
-    if (!localFile.empty() && localFile.back() != L'\\') localFile += L'\\';
-    localFile += e.name;
-
+    std::wstring localDir = m_localPath;
+    if (!localDir.empty() && localDir.back() != L'\\') localDir += L'\\';
     std::string remoteDir = m_remotePath;
-    std::string remoteFile = remoteDir;
-    if (!remoteFile.empty() && remoteFile.back() != '/') remoteFile += '/';
-    remoteFile += WideToUtf8(e.name);
+    if (!remoteDir.empty() && remoteDir.back() != '/') remoteDir += '/';
 
-    SetStatus(L"正在上传 " + e.name + L" ...");
+    // 一次 sftp 会话里发多条 put —— 认证只做一次，比逐个文件起进程快得多，
+    // 多选几十个文件时差别很明显。
+    std::string cmds;
+    for (const auto& n : names) {
+        cmds += "put " + EscapeSftpPath(ToRemotePath(localDir + n)) + " " +
+                EscapeSftpPath(remoteDir + WideToUtf8(n)) + "\n";
+    }
+
+    std::wstring what = (names.size() == 1)
+                            ? names[0]
+                            : (std::to_wstring(names.size()) + L" 个文件");
+    SetStatus(L"正在上传 " + what + L" ...");
+    LogLine(L"批量上传 %d 个文件：\n%S", (int)names.size(), cmds.c_str());
 
     Session sess = m_session;
     HWND hwnd = m_hwnd;
     auto alive = m_alive;
+    int skipped = skippedDirs;
 
-    std::thread([hwnd, alive, sess, localFile, remoteFile, name = e.name]() {
+    std::thread([hwnd, alive, sess, cmds, what, skipped]() {
         auto* t = new SftpTask();
         t->kind = SftpTask::Transfer;
 
-        std::string cmds = "put " + EscapeSftpPath(ToRemotePath(localFile)) + " " +
-                           EscapeSftpPath(remoteFile) + "\n";
         std::string output;
         std::wstring err;
         t->ok = RunSftpBatch(sess, cmds, output, &err, 10 * 60 * 1000);
         if (t->ok) {
-            t->message = L"上传完成：" + name;
+            t->message = L"上传完成：" + what;
+            if (skipped > 0) {
+                t->message += L"（跳过 " + std::to_wstring(skipped) + L" 个目录）";
+            }
         } else {
             std::wstring e2 = FirstErrorLine(output);
             t->message = e2.empty() ? (err.empty() ? L"上传失败。" : err) : e2;
@@ -1364,42 +1434,63 @@ void SftpWindow::DoUpload() {
 }
 
 void SftpWindow::DoDownload() {
-    int sel = SelRemote();
-    if (sel < 0 || sel >= (int)m_remoteItems.size()) {
-        SetStatus(L"请先在右侧选中要下载的文件。", true);
+    std::vector<int> sel = SelRemoteItems();
+    if (sel.empty()) {
+        SetStatus(L"请先在右侧选中要下载的文件（按住 Ctrl / Shift 可以多选）。", true);
         return;
     }
-    const SftpEntry& e = m_remoteItems[(size_t)sel];
-    if (e.isDir) {
-        SetStatus(L"暂不支持下载整个目录，请进入目录后逐个下载文件。", true);
+
+    // 收集待下载的文件；目录（含 ".."）跳过
+    std::vector<const SftpEntry*> files;
+    int skippedDirs = 0;
+    for (int idx : sel) {
+        if (idx < 0 || idx >= (int)m_remoteItems.size()) continue;
+        const SftpEntry& e = m_remoteItems[(size_t)idx];
+        if (e.isDir) { ++skippedDirs; continue; }
+        files.push_back(&e);
+    }
+    if (files.empty()) {
+        SetStatus(L"选中的都是目录。暂不支持下载整个目录，请进入目录后选文件。", true);
         return;
     }
     if (m_busy.exchange(true)) return;
     UpdateButtons();
 
     std::wstring localDir = m_localPath;
-    std::wstring localFile = localDir;
-    if (!localFile.empty() && localFile.back() != L'\\') localFile += L'\\';
-    localFile += e.name;
+    if (!localDir.empty() && localDir.back() != L'\\') localDir += L'\\';
 
-    SetStatus(L"正在下载 " + e.name + L" ...");
+    // 同样一次会话发多条 get
+    std::string cmds;
+    std::vector<std::wstring> names;
+    for (const SftpEntry* e : files) {
+        names.push_back(e->name);
+        cmds += "get " + EscapeSftpPath(e->path) + " " +
+                EscapeSftpPath(ToRemotePath(localDir + e->name)) + "\n";
+    }
+
+    std::wstring what = (names.size() == 1)
+                            ? names[0]
+                            : (std::to_wstring(names.size()) + L" 个文件");
+    SetStatus(L"正在下载 " + what + L" ...");
+    LogLine(L"批量下载 %d 个文件：\n%S", (int)names.size(), cmds.c_str());
 
     Session sess = m_session;
     HWND hwnd = m_hwnd;
     auto alive = m_alive;
-    std::string remoteFile = e.path;
+    int skipped = skippedDirs;
 
-    std::thread([hwnd, alive, sess, localFile, remoteFile, name = e.name]() {
+    std::thread([hwnd, alive, sess, cmds, what, skipped]() {
         auto* t = new SftpTask();
         t->kind = SftpTask::Transfer;
 
-        std::string cmds = "get " + EscapeSftpPath(remoteFile) + " " +
-                           EscapeSftpPath(ToRemotePath(localFile)) + "\n";
         std::string output;
         std::wstring err;
         t->ok = RunSftpBatch(sess, cmds, output, &err, 10 * 60 * 1000);
         if (t->ok) {
-            t->message = L"下载完成：" + name;
+            t->message = L"下载完成：" + what;
+            if (skipped > 0) {
+                t->message += L"（跳过 " + std::to_wstring(skipped) + L" 个目录）";
+            }
         } else {
             std::wstring e2 = FirstErrorLine(output);
             t->message = e2.empty() ? (err.empty() ? L"下载失败。" : err) : e2;
@@ -1464,22 +1555,39 @@ void SftpWindow::DoMkdir() {
 }
 
 void SftpWindow::DoDeleteRemote() {
-    int sel = SelRemote();
-    if (sel < 0 || sel >= (int)m_remoteItems.size()) {
-        SetStatus(L"请先在右侧选中要删除的项目。", true);
+    std::vector<int> sel = SelRemoteItems();
+    if (sel.empty()) {
+        SetStatus(L"请先在右侧选中要删除的项目（按住 Ctrl / Shift 可以多选）。", true);
         return;
     }
-    const SftpEntry& e = m_remoteItems[(size_t)sel];
 
-    // ".." 是我们自己塞进去做导航的，磁盘上并不存在这个条目 ——
-    // 放它过去会把 rmdir 打在父目录上。
-    if (e.name == L"..") {
+    // 收集待删除项。".." 是我们自己塞进去做导航的，磁盘上并不存在 ——
+    // 放它过去会把 rmdir 打在父目录上，所以直接跳过。
+    std::vector<const SftpEntry*> items;
+    for (int idx : sel) {
+        if (idx < 0 || idx >= (int)m_remoteItems.size()) continue;
+        const SftpEntry& e = m_remoteItems[(size_t)idx];
+        if (e.name == L"..") continue;
+        items.push_back(&e);
+    }
+    if (items.empty()) {
         SetStatus(L"「..」是用来返回上级的，不是真实条目，不能删除。", true);
         return;
     }
 
-    std::wstring msg = L"确定要删除远程" + std::wstring(e.isDir ? L"目录" : L"文件") +
-                       L"「" + e.name + L"」吗？\n\n" + Utf8ToWide(e.path) + L"\n\n此操作不可撤销。";
+    std::wstring msg;
+    if (items.size() == 1) {
+        const SftpEntry* e = items[0];
+        msg = L"确定要删除远程" + std::wstring(e->isDir ? L"目录" : L"文件") +
+              L"「" + e->name + L"」吗？\n\n" + Utf8ToWide(e->path) + L"\n\n此操作不可撤销。";
+    } else {
+        msg = L"确定要删除选中的 " + std::to_wstring(items.size()) + L" 个项目吗？\n\n";
+        for (size_t i = 0; i < items.size() && i < 10; ++i) {
+            msg += L"  " + items[i]->name + L"\n";
+        }
+        if (items.size() > 10) msg += L"  ...（其余 " + std::to_wstring(items.size() - 10) + L" 项）\n";
+        msg += L"\n此操作不可撤销。";
+    }
     if (MessageBoxW(m_hwnd, msg.c_str(), L"删除远程项目",
                     MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
         return;
@@ -1489,23 +1597,27 @@ void SftpWindow::DoDeleteRemote() {
     UpdateButtons();
     SetStatus(L"正在删除...");
 
-    std::string target = e.path;
-    bool isDir = e.isDir;
+    // 一次会话里发多条 rm / rmdir
+    std::string cmds;
+    for (const SftpEntry* e : items) {
+        cmds += std::string(e->isDir ? "rmdir " : "rm ") + EscapeSftpPath(e->path) + "\n";
+    }
+    size_t count = items.size();
+
     Session sess = m_session;
     HWND hwnd = m_hwnd;
     auto alive = m_alive;
 
-    std::thread([hwnd, alive, sess, target, isDir]() {
+    std::thread([hwnd, alive, sess, cmds, count]() {
         auto* t = new SftpTask();
         t->kind = SftpTask::Simple;
 
-        // 目录用 rmdir，文件用 rm
-        std::string cmds = std::string(isDir ? "rmdir " : "rm ") + EscapeSftpPath(target) + "\n";
         std::string output;
         std::wstring err;
         t->ok = RunSftpBatch(sess, cmds, output, &err);
         if (t->ok) {
-            t->message = L"已删除。";
+            t->message = (count == 1) ? L"已删除。"
+                                      : (L"已删除 " + std::to_wstring(count) + L" 项。");
         } else {
             std::wstring e2 = FirstErrorLine(output);
             t->message = e2.empty() ? (err.empty() ? L"删除失败。" : err) : e2;
@@ -1531,7 +1643,8 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             HWND h = CreateWindowExW(
                 0, L"LISTBOX", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | WS_VSCROLL |
-                    LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                    LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED |
+                    LBS_HASSTRINGS | LBS_EXTENDEDSEL,
                 0, 0, 10, 10, m_hwnd, (HMENU)(INT_PTR)id, hInst, nullptr);
             if (h) {
                 SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
@@ -1720,9 +1833,11 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
         switch (id) {
         case IDC_SFTP_LOCAL_LIST:
             if (code == LBN_DBLCLK) EnterLocal(SelLocal());
+            else if (code == LBN_SELCHANGE) ReportSelection();
             return 0;
         case IDC_SFTP_REMOTE_LIST:
             if (code == LBN_DBLCLK) EnterRemote(SelRemote());
+            else if (code == LBN_SELCHANGE) ReportSelection();
             return 0;
         case IDC_SFTP_UP:        DoUpload();       return 0;
         case IDC_SFTP_DOWN:      DoDownload();     return 0;
