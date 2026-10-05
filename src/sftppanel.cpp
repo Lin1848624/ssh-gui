@@ -621,6 +621,34 @@ private:
     std::atomic<bool> m_busy{false};
 
     RECT m_topRect = {}, m_bottomRect = {};
+
+    // ---- 多标签页 ----------------------------------------------------------
+    // 两侧各自一组标签，每个标签记住自己的目录。m_localPath / m_remotePath
+    // 始终代表**当前标签**的路径，只在切换标签的那一刻与标签数组同步 ——
+    // 这样导航、上传下载那些代码完全不必知道标签的存在。
+    struct PaneTab {
+        std::wstring localPath;
+        std::string  remotePath;
+    };
+    std::vector<PaneTab> m_localTabs;
+    std::vector<PaneTab> m_remoteTabs;
+    int  m_localActive  = 0;
+    int  m_remoteActive = 0;
+
+    RECT m_localTabsRect = {}, m_remoteTabsRect = {};
+    int  m_hoverTab      = -1;    // 悬停的标签下标
+    int  m_hoverSide     = 0;     // 0=无 1=本地 2=远程
+    bool m_hoverClose    = false; // 悬停在关闭叉上
+    bool m_hoverPlus     = false; // 悬停在 "+" 上
+
+    void SwitchLocalTab(int idx);
+    void SwitchRemoteTab(int idx);
+    void AddLocalTab();
+    void AddRemoteTab();
+    void CloseLocalTab(int idx);
+    void CloseRemoteTab(int idx);
+    void DrawTabStrip(Gdiplus::Graphics& g, const RECT& rc, bool local);
+    int  HitTestTabs(const RECT& rc, int count, int x, int y, bool* onClose, bool* onPlus);
 };
 
 void SftpWindow::SetStatus(const std::wstring& s, bool isError) {
@@ -642,6 +670,202 @@ void SftpWindow::UpdateButtons() {
     InvalidateRect(m_btnMkdir, nullptr, TRUE);
     InvalidateRect(m_btnDelete, nullptr, TRUE);
     InvalidateRect(m_btnRefresh, nullptr, TRUE);
+}
+
+// ---------------------------------------------------------------------------
+//  多标签页
+// ---------------------------------------------------------------------------
+namespace {
+
+// 标签栏的几何：固定宽度，标题长了自己省略 —— 布局与命中测试共用同一套算法，
+// 免得出现"看着在这里、点下去是另一个"。
+constexpr int kTabW      = 118;   // 逻辑像素
+constexpr int kTabPlusW  = 26;
+constexpr int kTabGap    = 2;
+
+int TabStripStep() { return S(kTabW) + S(kTabGap); }
+
+// 本地路径取个短标题：最后一段；盘符根就显示盘符。
+std::wstring LocalTabTitle(const std::wstring& p) {
+    if (p.size() <= 3) return p.empty() ? L"?" : p;
+    size_t pos = p.find_last_of(L'\\');
+    if (pos == std::wstring::npos || pos + 1 >= p.size()) return p;
+    std::wstring t = p.substr(pos + 1);
+    return t.empty() ? p : t;
+}
+
+// 远程路径同理。"/" 显示成 "/"。
+std::wstring RemoteTabTitle(const std::string& p) {
+    if (p.empty()) return L"?";
+    std::string s = p;
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+    if (s == "/") return L"/";
+    size_t pos = s.find_last_of('/');
+    std::wstring t = Utf8ToWide(pos == std::string::npos ? s : s.substr(pos + 1));
+    return t.empty() ? L"/" : t;
+}
+
+} // namespace
+
+int SftpWindow::HitTestTabs(const RECT& rc, int count, int x, int y,
+                            bool* onClose, bool* onPlus) {
+    if (onClose) *onClose = false;
+    if (onPlus)  *onPlus  = false;
+    if (y < rc.top || y >= rc.bottom) return -1;
+
+    int step = TabStripStep();
+    int first = rc.left + S(4);
+    for (int i = 0; i < count; ++i) {
+        int left = first + i * step;
+        if (x >= left && x < left + S(kTabW)) {
+            // 激活标签的右端多画了一个 ×，命中区也划在那里
+            if (onClose && x >= left + S(kTabW) - S(20)) *onClose = true;
+            return i;
+        }
+    }
+    int plusLeft = first + count * step + S(4);
+    if (x >= plusLeft && x < plusLeft + S(kTabPlusW)) {
+        if (onPlus) *onPlus = true;
+    }
+    return -1;
+}
+
+void SftpWindow::SwitchLocalTab(int idx) {
+    if (idx < 0 || idx >= (int)m_localTabs.size() || idx == m_localActive) return;
+    m_localTabs[(size_t)m_localActive].localPath = m_localPath;   // 存回当前
+    m_localActive = idx;
+    m_localPath = m_localTabs[(size_t)idx].localPath;             // 载入目标
+    RefreshLocal();
+    InvalidateRect(m_hwnd, &m_localTabsRect, FALSE);
+}
+
+void SftpWindow::SwitchRemoteTab(int idx) {
+    if (idx < 0 || idx >= (int)m_remoteTabs.size() || idx == m_remoteActive) return;
+    m_remoteTabs[(size_t)m_remoteActive].remotePath = m_remotePath;
+    m_remoteActive = idx;
+    m_remotePath = m_remoteTabs[(size_t)idx].remotePath;
+    m_remoteError.clear();
+    RefreshRemote();
+    InvalidateRect(m_hwnd, &m_remoteTabsRect, FALSE);
+}
+
+void SftpWindow::AddLocalTab() {
+    m_localTabs[(size_t)m_localActive].localPath = m_localPath;
+    PaneTab t;
+    t.localPath = m_localPath;     // 新标签停在同一个目录，多数时候正是想要的
+    m_localTabs.push_back(t);
+    m_localActive = (int)m_localTabs.size() - 1;
+    RefreshLocal();
+    InvalidateRect(m_hwnd, &m_localTabsRect, FALSE);
+}
+
+void SftpWindow::AddRemoteTab() {
+    m_remoteTabs[(size_t)m_remoteActive].remotePath = m_remotePath;
+    PaneTab t;
+    t.remotePath = m_remotePath;
+    m_remoteTabs.push_back(t);
+    m_remoteActive = (int)m_remoteTabs.size() - 1;
+    m_remoteError.clear();
+    RefreshRemote();
+    InvalidateRect(m_hwnd, &m_remoteTabsRect, FALSE);
+}
+
+void SftpWindow::CloseLocalTab(int idx) {
+    if (idx < 0 || idx >= (int)m_localTabs.size()) return;
+    if (m_localTabs.size() <= 1) return;          // 至少留一个，不然这一侧就空了
+    m_localTabs.erase(m_localTabs.begin() + idx);
+    if (idx < m_localActive) {
+        --m_localActive;
+    } else if (idx == m_localActive) {
+        if (m_localActive >= (int)m_localTabs.size()) m_localActive = (int)m_localTabs.size() - 1;
+        m_localPath = m_localTabs[(size_t)m_localActive].localPath;
+        RefreshLocal();
+    }
+    InvalidateRect(m_hwnd, &m_localTabsRect, FALSE);
+}
+
+void SftpWindow::CloseRemoteTab(int idx) {
+    if (idx < 0 || idx >= (int)m_remoteTabs.size()) return;
+    if (m_remoteTabs.size() <= 1) return;
+    m_remoteTabs.erase(m_remoteTabs.begin() + idx);
+    if (idx < m_remoteActive) {
+        --m_remoteActive;
+    } else if (idx == m_remoteActive) {
+        if (m_remoteActive >= (int)m_remoteTabs.size()) m_remoteActive = (int)m_remoteTabs.size() - 1;
+        m_remotePath = m_remoteTabs[(size_t)m_remoteActive].remotePath;
+        m_remoteError.clear();
+        RefreshRemote();
+    }
+    InvalidateRect(m_hwnd, &m_remoteTabsRect, FALSE);
+}
+
+void SftpWindow::DrawTabStrip(Gdiplus::Graphics& g, const RECT& rc, bool local) {
+    const std::vector<PaneTab>& tabs = local ? m_localTabs : m_remoteTabs;
+    int active = local ? m_localActive : m_remoteActive;
+    int side   = local ? 1 : 2;
+
+    Gfx::FillRectC(g, RectF((REAL)rc.left, (REAL)rc.top,
+                            (REAL)(rc.right - rc.left), (REAL)(rc.bottom - rc.top)),
+                   Theme::PanelBg);
+    Gfx::Line(g, (REAL)rc.left, (REAL)rc.bottom - 0.5f, (REAL)rc.right,
+              (REAL)rc.bottom - 0.5f, Theme::Border);
+
+    Font* f  = Gfx::UiFont(S(12), false);
+    Font* fb = Gfx::UiFont(S(12), true);
+
+    int step   = TabStripStep();
+    int first  = rc.left + S(4);
+    int top    = rc.top + S(4);
+    int height = (rc.bottom - rc.top) - S(6);
+
+    for (int i = 0; i < (int)tabs.size(); ++i) {
+        int left = first + i * step;
+        RECT tr = { left, top, left + S(kTabW), top + height };
+        bool isActive = (i == active);
+        bool hovered  = (m_hoverSide == side && m_hoverTab == i);
+
+        uint32_t bg = isActive ? Theme::TabActive : (hovered ? Theme::TabHover : Theme::TabIdle);
+        Gfx::FillRectC(g, RectF((REAL)tr.left, (REAL)tr.top,
+                                (REAL)(tr.right - tr.left), (REAL)(tr.bottom - tr.top)), bg);
+
+        // 激活标签顶上一条高亮，和终端标签页的观感一致
+        if (isActive) {
+            Gfx::FillRectC(g, RectF((REAL)tr.left, (REAL)tr.top,
+                                    (REAL)(tr.right - tr.left), (REAL)S(2)), Theme::Accent);
+        }
+        Gfx::Line(g, (REAL)tr.right - 0.5f, (REAL)tr.top + S(3),
+                  (REAL)tr.right - 0.5f, (REAL)tr.bottom - S(3), Theme::Border);
+
+        std::wstring title = local ? LocalTabTitle(tabs[(size_t)i].localPath)
+                                   : RemoteTabTitle(tabs[(size_t)i].remotePath);
+        // 激活标签右边要留出 × 的位置
+        REAL textW = (REAL)(tr.right - tr.left) - (isActive ? S(26) : S(12));
+        Gfx::Text(g, title, isActive ? fb : f,
+                  isActive ? Theme::Text : Theme::TextDim,
+                  RectF((REAL)tr.left + S(6), (REAL)tr.top, textW,
+                        (REAL)(tr.bottom - tr.top)),
+                  0, 1);
+
+        if (isActive) {
+            // 关闭叉
+            bool closeHover = (m_hoverSide == side && m_hoverTab == i && m_hoverClose);
+            RectF cr((REAL)(tr.right - S(19)), (REAL)(tr.top + (height - S(14)) / 2),
+                     (REAL)S(14), (REAL)S(14));
+            Gfx::Text(g, L"\x00D7", f, closeHover ? Theme::Err : Theme::TextFaint,
+                      cr, 0, 1);
+        }
+    }
+
+    // "+" 新建标签
+    int plusLeft = first + (int)tabs.size() * step + S(4);
+    RECT pr = { plusLeft, top, plusLeft + S(kTabPlusW), top + height };
+    bool plusHover = (m_hoverSide == side && m_hoverPlus);
+    Gfx::FillRectC(g, RectF((REAL)pr.left, (REAL)pr.top,
+                            (REAL)(pr.right - pr.left), (REAL)(pr.bottom - pr.top)),
+                   plusHover ? Theme::BtnHover : Theme::TabIdle);
+    Gfx::Text(g, L"+", fb, plusHover ? Theme::Text : Theme::TextDim,
+              RectF((REAL)pr.left, (REAL)pr.top, (REAL)(pr.right - pr.left),
+                    (REAL)(pr.bottom - pr.top)), 0, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +897,7 @@ bool SftpWindow::Create(HWND parent, const Session& s) {
 
     std::wstring title = L"文件传输 - " + s.DisplayName() + L"  (" + s.Target() + L")";
 
-    int W = S(920), H = S(580);
+    int W = S(920), H = S(608);   // 608 = 580 + 28，把标签栏那一条的高度补回来
     RECT rc = { 0, 0, W, H };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0);
 
@@ -721,7 +945,8 @@ void SftpWindow::Layout() {
     GetClientRect(m_hwnd, &rc);
     int W = rc.right, H = rc.bottom;
 
-    int topH = S(58);
+    int tabsH = S(28);
+    int topH = S(58) + tabsH;          // 58 = 标题 + 路径两行，下面接标签栏
     int botH = S(46);
     m_topRect = { 0, 0, W, topH };
     m_bottomRect = { 0, H - botH, W, H };
@@ -737,6 +962,9 @@ void SftpWindow::Layout() {
 
     int lx = pad;
     int rx = pad * 2 + colW + midW;
+
+    m_localTabsRect  = { lx, S(58), lx + colW, S(58) + tabsH };
+    m_remoteTabsRect = { rx, S(58), rx + colW, S(58) + tabsH };
 
     MoveWindow(m_lbLocal, lx, listTop, colW, listH, TRUE);
     MoveWindow(m_lbRemote, rx, listTop, colW, listH, TRUE);
@@ -807,6 +1035,10 @@ void SftpWindow::Paint(HDC hdcTarget) {
             Gfx::Text(g, Utf8ToWide(m_remotePath), f, Theme::TextDim,
                       RectF((REAL)(W / 2 + S(12)), (REAL)S(28), (REAL)(W / 2 - S(24)), (REAL)S(20)), 0, 1);
         }
+
+        // 标签栏（在路径行下面，两边各一条）
+        DrawTabStrip(g, m_localTabsRect, true);
+        DrawTabStrip(g, m_remoteTabsRect, false);
 
         // 底栏
         RectF br((REAL)m_bottomRect.left, (REAL)m_bottomRect.top,
@@ -1334,6 +1566,16 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
         m_btnOpenLocal = mkBtn(IDC_SFTP_OPEN_LOCAL, L"选择本地目录...");
         m_btnRefreshLocal = mkBtn(IDC_SFTP_REFRESH_LOCAL, L"刷新本地");
 
+        // 两侧各起一个标签，路径取自当前值
+        m_localTabs.clear();
+        m_remoteTabs.clear();
+        m_localTabs.resize(1);
+        m_remoteTabs.resize(1);
+        m_localActive = 0;
+        m_remoteActive = 0;
+        m_localTabs[0].localPath = m_localPath;
+        m_remoteTabs[0].remotePath = m_remotePath;
+
         Layout();
         RefreshLocal();
         RefreshRemote();
@@ -1344,6 +1586,70 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         Layout();
         return 0;
+
+    // ---- 标签栏的鼠标交互 --------------------------------------------------
+    // 标签栏是自己画的（不是控件），所以命中判定和 hover 跟踪都在这里做。
+    case WM_MOUSEMOVE: {
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        bool onClose = false, onPlus = false;
+        int side = 0, idx = -1;
+
+        int li = HitTestTabs(m_localTabsRect, (int)m_localTabs.size(), x, y, &onClose, &onPlus);
+        if (li >= 0 || onPlus) { side = 1; idx = li; }
+        else {
+            bool c2 = false, p2 = false;
+            int ri = HitTestTabs(m_remoteTabsRect, (int)m_remoteTabs.size(), x, y, &c2, &p2);
+            if (ri >= 0 || p2) { side = 2; idx = ri; onClose = c2; onPlus = p2; }
+        }
+
+        bool plus = onPlus;
+        if (side != m_hoverSide || idx != m_hoverTab ||
+            onClose != m_hoverClose || plus != m_hoverPlus) {
+            m_hoverSide  = side;
+            m_hoverTab   = idx;
+            m_hoverClose = onClose;
+            m_hoverPlus  = plus;
+            RECT r1 = m_localTabsRect, r2 = m_remoteTabsRect;
+            InvalidateRect(m_hwnd, &r1, FALSE);
+            InvalidateRect(m_hwnd, &r2, FALSE);
+        }
+        // 标签栏的 hover 要自己跟踪离开，否则鼠标移走后高亮会一直留着
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, m_hwnd, 0 };
+        TrackMouseEvent(&tme);
+        break;   // 交给 DefWindowProc，不影响子控件
+    }
+
+    case WM_MOUSELEAVE:
+        if (m_hoverSide != 0) {
+            m_hoverSide = 0; m_hoverTab = -1; m_hoverClose = false; m_hoverPlus = false;
+            RECT r1 = m_localTabsRect, r2 = m_remoteTabsRect;
+            InvalidateRect(m_hwnd, &r1, FALSE);
+            InvalidateRect(m_hwnd, &r2, FALSE);
+        }
+        return 0;
+
+    case WM_LBUTTONDOWN: {
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        bool onClose = false, onPlus = false;
+
+        int li = HitTestTabs(m_localTabsRect, (int)m_localTabs.size(), x, y, &onClose, &onPlus);
+        if (li >= 0 || onPlus) {
+            if (onPlus)                          AddLocalTab();
+            else if (onClose && li == m_localActive) CloseLocalTab(li);
+            else if (!onClose)                   SwitchLocalTab(li);
+            return 0;
+        }
+
+        bool c2 = false, p2 = false;
+        int ri = HitTestTabs(m_remoteTabsRect, (int)m_remoteTabs.size(), x, y, &c2, &p2);
+        if (ri >= 0 || p2) {
+            if (p2)                          AddRemoteTab();
+            else if (c2 && ri == m_remoteActive) CloseRemoteTab(ri);
+            else if (!c2)                    SwitchRemoteTab(ri);
+            return 0;
+        }
+        break;
+    }
 
     case WM_ERASEBKGND:
         return 1;
