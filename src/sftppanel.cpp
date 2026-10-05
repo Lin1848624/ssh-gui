@@ -1651,6 +1651,21 @@ LRESULT SftpWindow::Proc(UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
 
+    // 中键点标签 = 关闭它。这是浏览器/编辑器的通行习惯，
+    // 比去够那个小小的 × 顺手得多；任意标签都能关，不只是激活的那个。
+    case WM_MBUTTONDOWN: {
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        bool onClose = false, onPlus = false;
+
+        int li = HitTestTabs(m_localTabsRect, (int)m_localTabs.size(), x, y, &onClose, &onPlus);
+        if (li >= 0) { CloseLocalTab(li); return 0; }
+
+        bool c2 = false, p2 = false;
+        int ri = HitTestTabs(m_remoteTabsRect, (int)m_remoteTabs.size(), x, y, &c2, &p2);
+        if (ri >= 0) { CloseRemoteTab(ri); return 0; }
+        break;
+    }
+
     case WM_ERASEBKGND:
         return 1;
 
