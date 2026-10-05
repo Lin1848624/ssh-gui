@@ -27,7 +27,7 @@ GUI 框架或网络库；SSH 协议本身交给系统自带的 OpenSSH 客户端
 | 滚动回看 | 8000 行历史缓冲，滚轮 / Ctrl+Home / Ctrl+End / Ctrl+PageUp / Ctrl+PageDown |
 | 字体缩放 | Ctrl+Shift+加减号，Ctrl+Shift+0 复位 |
 | 端口转发 | 界面里配置 `-L` 本地 / `-R` 远程 / `-D` 动态(SOCKS5) 三类隧道，支持多条 |
-| 文件传输 | SFTP 面板：左右双栏浏览本地与远端，上传、下载、删除、新建目录、双击进目录 |
+| 文件传输 | SFTP 面板：左右双栏浏览本地与远端，上传、下载、删除、新建目录、双击进目录，`..` 返回上级；两侧各有独立刷新按钮 |
 | 剪贴板 | 选中即复制、右键粘贴、Ctrl+Shift+C/V、Ctrl+Shift+A 全选，支持 OSC 52 |
 | 其它 | 标签标题跟随远端 `OSC 0/1/2`、终端响铃闪烁窗口、会话结束显示退出码 |
 
@@ -105,7 +105,7 @@ src/
   terminal.h/.cpp    终端视图子窗口：网格渲染、键盘鼠标、选区、滚动
   widgets.h/.cpp     GDI+ 绘图辅助、自绘按钮、深色标题栏
   dialogs.h/.cpp     会话编辑对话框、端口转发编辑、简易输入框
-  sftppanel.h/.cpp   SFTP 文件传输窗口（sftp.exe 批处理模式 + ls -l 解析）
+  sftppanel.h/.cpp   SFTP 文件传输窗口（sftp.exe 交互模式 + ls -l 解析）
   main.cpp           主窗口：工具条、会话侧边栏、多标签、状态栏、程序入口
 res/                 图标与版本信息
 tests/               端到端测试桩（fake_ssh / fake_sftp / gdi_probe）
