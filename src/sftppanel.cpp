@@ -389,6 +389,13 @@ bool SftpListDir(const Session& s, const std::string& path,
                            L"以及该服务器是否允许密码登录。";
                 }
             }
+        } else if (output.find("remote readdir") != std::string::npos ||
+                   output.find("Couldn't read directory") != std::string::npos) {
+            // 目录确实存在、cd 也成功了，只是服务器不让读它 —— 典型是 Android 的
+            // /storage/emulated 这种只给 execute 不给 read 的目录。
+            // 直接把 "remote readdir(...): No such file or directory" 甩给用户，
+            // 既看不懂、又像是程序坏了。
+            if (err) *err = L"服务器不允许列出这个目录（通常是权限限制）。";
         } else if (err && err->empty()) {
             std::wstring e = FirstErrorLine(output);
             *err = e.empty() ? L"sftp 执行失败。" : e;
@@ -943,6 +950,14 @@ void SftpWindow::HandleTask(SftpTask* t) {
 
     if (!t->ok) {
         std::wstring msg = t->message.empty() ? L"操作失败。" : t->message;
+        // 列目录失败时补上"想进的"和"当前所在的"，否则用户只看到一句报错，
+        // 既不知道是谁的问题、也不知道自己现在停在哪。
+        if (t->kind == SftpTask::ListRemote && !t->remotePath.empty()) {
+            msg = L"无法读取 " + Utf8ToWide(t->remotePath) + L"：" + msg;
+            if (!m_remotePath.empty() && m_remotePath != t->remotePath) {
+                msg += L"（仍停留在 " + Utf8ToWide(m_remotePath) + L"）";
+            }
+        }
         SetStatus(msg, true);
         if (t->kind == SftpTask::ListRemote) {
             // 只留错误信息，**故意不清空列表**。
