@@ -293,13 +293,27 @@ bool LooksLikeNoise(const std::string& line) {
 }
 
 std::wstring FirstErrorLine(const std::string& output) {
+    // 只认真正像错误的措辞。
+    // 这里**不能复用 LooksLikeNoise** —— 那个名单是给"别把提示符/问候语当成目录项"
+    // 用的，里面既有错误（Permission denied）也有完全正常的行
+    // （Connected to / Remote working directory）。拿它当错误行用，就会把
+    // "Connected to 192.168.1.225." 这种问候语报给用户当失败原因。
+    static const char* marks[] = {
+        "Permission denied", "No such file", "not found", "Connection closed",
+        "Lost connection", "Couldn't", "Invalid command", "usage:",
+        "Failure", "not a directory", "Bad message", "File not found",
+        "remote readdir", "remote mkdir", "remote rmdir", "remote rename",
+        "remote remove", "No space left", "Quota exceeded", "stat remote",
+    };
     size_t pos = 0;
     while (pos < output.size()) {
         size_t end = output.find('\n', pos);
         std::string line = output.substr(pos, (end == std::string::npos) ? std::string::npos : end - pos);
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-        if (!line.empty() && LooksLikeNoise(line) && line.compare(0, 5, "sftp>") != 0) {
-            return Utf8ToWide(line);
+        if (!line.empty() && line.compare(0, 5, "sftp>") != 0) {
+            for (const char* m : marks) {
+                if (line.find(m) != std::string::npos) return Utf8ToWide(line);
+            }
         }
         if (end == std::string::npos) break;
         pos = end + 1;
@@ -316,6 +330,7 @@ bool LooksLikeCommandFailure(const std::string& output) {
         "remote rmdir",
         "remote rename",
         "remote remove",
+        "remote readdir",           // 目录存在但无权读，ls 会报这个
         "Couldn't ",                // Couldn't stat / Couldn't read directory
         "No such file or directory",
         "Permission denied",
@@ -558,6 +573,7 @@ private:
 
     void RefreshLocal();
     void RefreshRemote();
+    void RefreshRemoteTo(const std::string& target);
     void HandleTask(SftpTask* t);
 
     void EnterLocal(int index);
@@ -875,12 +891,19 @@ void SftpWindow::OnDrawItem(const DRAWITEMSTRUCT* dis) {
 //  后台任务
 // ---------------------------------------------------------------------------
 void SftpWindow::RefreshRemote() {
+    RefreshRemoteTo(m_remotePath);
+}
+
+// 列指定目录。**成功之前不动 m_remotePath** —— 否则进了列不出来的目录
+// （Android 的 /storage/emulated 就是：能 cd 进去但无权 readdir）之后，
+// 路径已经改了、列表又是空的，用户会卡在一个空窗口里连 ".." 都没有。
+void SftpWindow::RefreshRemoteTo(const std::string& target) {
     if (m_busy.exchange(true)) return;
     UpdateButtons();
-    SetStatus(L"正在读取远程目录 " + Utf8ToWide(m_remotePath) + L" ...");
+    SetStatus(L"正在读取远程目录 " + Utf8ToWide(target) + L" ...");
 
     Session sess = m_session;
-    std::string path = m_remotePath;
+    std::string path = target;
     HWND hwnd = m_hwnd;
     auto alive = m_alive;
 
@@ -922,11 +945,12 @@ void SftpWindow::HandleTask(SftpTask* t) {
         std::wstring msg = t->message.empty() ? L"操作失败。" : t->message;
         SetStatus(msg, true);
         if (t->kind == SftpTask::ListRemote) {
-            // 列目录失败时清空列表并把原因留在界面上，
-            // 不然就是"一片空白"，用户根本不知道发生了什么
+            // 只留错误信息，**故意不清空列表**。
+            // 清空之后用户既看不到内容、又没有 ".." 可以退，会卡在一个空窗口里 ——
+            // Android 的 /storage/emulated 正是这种：能 cd 进去但无权 readdir。
+            // 保留上一个成功列出的目录，他还能继续操作。
+            // （m_remotePath 也没被改过，见 RefreshRemoteTo 的注释。）
             m_remoteError = msg;
-            m_remoteItems.clear();
-            SendMessageW(m_lbRemote, LB_RESETCONTENT, 0, 0);
         }
         UpdateButtons();
         InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -1018,8 +1042,8 @@ void SftpWindow::EnterRemote(int index) {
     // Android 的 Termux 里 storage/ 下面（以及很多别处）全是这种链接，
     // 一律拦掉的话能操作的目录范围会小得可怜。
     if (!e.isDir && !e.isLink) return;
-    m_remotePath = e.path;
-    RefreshRemote();
+    // 交给 RefreshRemoteTo 去试，成功才切换路径（见它的注释）
+    RefreshRemoteTo(e.path);
 }
 
 void SftpWindow::ChooseLocalDir() {
