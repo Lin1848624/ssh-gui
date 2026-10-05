@@ -47,6 +47,7 @@ struct Session {
     bool         verbose   = false;
     bool         keepAlive = true;
     bool         autoAcceptHostKey = false;  // 首次连接自动信任主机密钥（存在中间人风险）
+    bool         autoConnect = false;        // 程序启动后自动连这个会话
 
     std::vector<PortForward> forwards;
 

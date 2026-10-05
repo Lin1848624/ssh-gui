@@ -74,6 +74,8 @@ private:
     void EditSelected();
     void DeleteSelected();
     void ConnectSelected();
+    // 启动时把勾了"自动连接"的会话逐个连上（各开一个标签）
+    void AutoConnectSessions();
     void ConnectSession(const Session& s);
     void ActivateTab(int index);
     void CloseTab(int index);
@@ -172,7 +174,28 @@ bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
     ApplyDarkTitleBar(m_hwnd);
     ShowWindow(m_hwnd, nCmdShow);
     UpdateWindow(m_hwnd);
+
+    // 自动连接放在窗口显示之后：终端要按内容区尺寸建 ConPTY，
+    // 窗口还没显示时那个尺寸是错的。
+    AutoConnectSessions();
     return true;
+}
+
+void MainWindow::AutoConnectSessions() {
+    int started = 0;
+    for (const Session& s : m_store.items) {
+        if (!s.autoConnect) continue;
+        if (!s.Valid()) {
+            LogLine(L"会话「%s」勾了自动连接但没有主机地址，跳过", s.name.c_str());
+            continue;
+        }
+        ConnectSession(s);      // 每个会话各开一个标签
+        ++started;
+    }
+    if (started > 0) {
+        LogLine(L"启动时自动连接了 %d 个会话", started);
+        SetStatus(L"已自动连接 " + std::to_wstring(started) + L" 个会话", L"");
+    }
 }
 
 // ===========================================================================

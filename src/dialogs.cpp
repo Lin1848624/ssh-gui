@@ -38,6 +38,7 @@ enum : int {
     IDC_CHK_KEEPALIVE,
     IDC_CHK_VERBOSE,
     IDC_CHK_AUTOACCEPT,
+    IDC_CHK_AUTOCONNECT,
     IDC_BTN_OK,
     IDC_BTN_CANCEL,
 };
@@ -120,6 +121,7 @@ struct SessionDlg {
     bool keepAlive = true;
     bool verbose = false;
     bool autoAccept = false;
+    bool autoConnect = false;
     std::vector<PortForward> forwards;
     int fwdSel = -1;
 
@@ -134,6 +136,7 @@ struct SessionDlg {
     HWND chkSave = nullptr, chkComp = nullptr, chkAlive = nullptr, chkVerbose = nullptr;
     HWND chkShowPass = nullptr;
     HWND chkAutoAccept = nullptr;
+    HWND chkAutoConnect = nullptr;
 };
 
 constexpr const wchar_t* kSessionClass = L"SshGuiSessionDlg";
@@ -183,6 +186,9 @@ void SessionDlgLayout(SessionDlg* d) {
 
     y += S(32);
     place(d->chkAutoAccept, x, y, w, h);
+
+    y += S(28);
+    place(d->chkAutoConnect, x, y, w, h);
 
     // 端口转发
     y += S(40);
@@ -263,7 +269,9 @@ void SessionDlgPaint(SessionDlg* d, HDC hdcTarget) {
         label(L"密码", y, nullptr);
         y += S(38);
 
-        y += S(32);   // 让出"首次连接自动信任主机密钥"勾选框那一行
+        // 让出下面两行勾选框（"首次连接自动信任主机密钥" + "启动程序后自动连接"）。
+        // 这里和 SessionDlgLayout 是各写一遍坐标的，加/删勾选框时两边都要动。
+        y += S(60);
 
         label(L"端口转发", y + S(6), fb);
         y += S(18);
@@ -319,6 +327,9 @@ void SessionDlgCreateControls(SessionDlg* d) {
     d->chkAutoAccept = MakeButton(h, IDC_CHK_AUTOACCEPT,
                                   L"首次连接自动信任主机密钥（省去手动输 yes，但会失去中间人防护）",
                                   BS_PUSHBUTTON);
+    d->chkAutoConnect = MakeButton(h, IDC_CHK_AUTOCONNECT,
+                                   L"启动程序后自动连接这个会话",
+                                   BS_PUSHBUTTON);
 
     d->lbFwd = CreateWindowExW(
         0, L"LISTBOX", L"",
@@ -344,10 +355,11 @@ void SessionDlgCreateControls(SessionDlg* d) {
     d->keepAlive = s.keepAlive;
     d->verbose   = s.verbose;
     d->autoAccept = s.autoAcceptHostKey;
+    d->autoConnect = s.autoConnect;
     d->forwards  = s.forwards;
     SessionDlgRefreshForwards(d);
 
-    int W = S(560), H = S(580);
+    int W = S(560), H = S(608);
     RECT rc = { 0, 0, W, H };
     AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
     SetWindowPos(h, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
@@ -383,6 +395,7 @@ bool SessionDlgCollect(SessionDlg* d) {
     s.keepAlive = d->keepAlive;
     s.verbose = d->verbose;
     s.autoAcceptHostKey = d->autoAccept;
+    s.autoConnect = d->autoConnect;
     s.forwards = d->forwards;
 
     if (s.host.empty()) {
@@ -480,13 +493,16 @@ LRESULT CALLBACK SessionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         if (dis->CtlID == IDC_CHK_SAVEPASS || dis->CtlID == IDC_CHK_COMPRESS ||
             dis->CtlID == IDC_CHK_KEEPALIVE || dis->CtlID == IDC_CHK_VERBOSE ||
-            dis->CtlID == IDC_CHK_AUTOACCEPT || dis->CtlID == IDC_CHK_SHOWPASS) {
+            dis->CtlID == IDC_CHK_AUTOACCEPT || dis->CtlID == IDC_CHK_SHOWPASS ||
+            dis->CtlID == IDC_CHK_AUTOCONNECT) {
 
             bool checked = (dis->CtlID == IDC_CHK_SAVEPASS) ? d->savePass
                          : (dis->CtlID == IDC_CHK_COMPRESS) ? d->compress
                          : (dis->CtlID == IDC_CHK_KEEPALIVE) ? d->keepAlive
                          : (dis->CtlID == IDC_CHK_VERBOSE) ? d->verbose
-                                                           : (dis->CtlID == IDC_CHK_SHOWPASS) ? d->showPass : d->autoAccept;
+                         : (dis->CtlID == IDC_CHK_SHOWPASS) ? d->showPass
+                         : (dis->CtlID == IDC_CHK_AUTOCONNECT) ? d->autoConnect
+                                                               : d->autoAccept;
             RECT rc = dis->rcItem;
             bool hovered = ButtonHovered(dis->hwndItem);
 
@@ -559,6 +575,10 @@ LRESULT CALLBACK SessionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                          (WPARAM)(d->showPass ? 0 : L'\x25CF'), 0);
             InvalidateRect(d->edPass, nullptr, TRUE);
             InvalidateRect(d->chkShowPass, nullptr, TRUE);
+            return 0;
+        case IDC_CHK_AUTOCONNECT:
+            d->autoConnect = !d->autoConnect;
+            InvalidateRect(d->chkAutoConnect, nullptr, TRUE);
             return 0;
         case IDC_CHK_AUTOACCEPT:
             d->autoAccept = !d->autoAccept;

@@ -163,6 +163,7 @@ static Json SessionToJson(const Session& s) {
     j.Set("verbose", s.verbose);
     j.Set("keepAlive", s.keepAlive);
     j.Set("autoAcceptHostKey", s.autoAcceptHostKey);
+    j.Set("autoConnect", s.autoConnect);
     j.Set("savePassword", s.savePassword);
     if (s.savePassword && !s.password.empty()) {
         std::string enc = ProtectPassword(s.password);
@@ -188,6 +189,7 @@ static Session SessionFromJson(const Json& j) {
     s.verbose     = j.GetBool("verbose", false);
     s.keepAlive   = j.GetBool("keepAlive", true);
     s.autoAcceptHostKey = j.GetBool("autoAcceptHostKey", false);
+    s.autoConnect = j.GetBool("autoConnect", false);
     s.savePassword = j.GetBool("savePassword", false);
     if (s.savePassword) s.password = UnprotectPassword(j.GetStr("password"));
     if (const std::vector<Json>* fa = j.GetArr("forwards")) {
